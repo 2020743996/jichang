@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.ContentValues
 import android.content.Context
 import android.app.Activity
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -96,12 +97,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
@@ -115,6 +118,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.Image
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -142,6 +147,7 @@ import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.NodeAutoGroups
 import com.jzb.jichang.android.service.RemoteConfigDownloader
+import com.jzb.jichang.android.service.LanShareQrCode
 import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -157,8 +163,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppPage(val label: String) { Home("概览"), Resources("资源"), Config("配置"), Templates("模板") }
-private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("节点") }
+private enum class AppPage(val label: String) { Home("概览"), Share("分享"), Resources("资源") }
+private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("节点"), Templates("模板") }
 private enum class ConfigTab(val label: String) { Rules("规则"), Export("分享") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
@@ -361,9 +367,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     AppPage.entries.forEach { item ->
                         val icon = when (item) {
                             AppPage.Home -> Icons.Outlined.Home
+                            AppPage.Share -> Icons.Outlined.Share
                             AppPage.Resources -> Icons.Outlined.Devices
-                            AppPage.Config -> Icons.Outlined.Description
-                            AppPage.Templates -> Icons.Outlined.FolderOpen
                         }
                         NavigationBarItem(
                             selected = page == item,
@@ -397,15 +402,44 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     },
                     label = "main-page-transition",
                 ) { currentPage -> when (currentPage) {
-                    AppPage.Home -> HomePage(state, onNavigate = { page = it }, modifier = Modifier.fillMaxSize())
+                    AppPage.Home -> HomePage(
+                        state = state,
+                        onNavigate = { page = it },
+                        onOpenTemplates = { page = AppPage.Resources; resourceTab = ResourceTab.Templates },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     AppPage.Resources -> Column(Modifier.fillMaxSize()) {
                         SegmentedTabs(ResourceTab.entries.map { it.label }, resourceTab.ordinal) { resourceTab = ResourceTab.entries[it] }
                         when (resourceTab) {
                             ResourceTab.Sources -> SourcesPage(state, viewModel, { dialog = DialogKind.Source }, Modifier.weight(1f))
-                            ResourceTab.Nodes -> NodesPage(state, viewModel, Modifier.weight(1f)) { dialog = DialogKind.Node }
+                            ResourceTab.Nodes -> NodesPage(
+                                state = state,
+                                viewModel = viewModel,
+                                modifier = Modifier.weight(1f),
+                                onAdd = { dialog = DialogKind.Node },
+                                onRegionChange = { id, key ->
+                                    val overrides = if (key == null) profile.regionOverrides - id else profile.regionOverrides + (id to key)
+                                    viewModel.updateExportSettings(profile.sourceMode, profile.enabledRegions, overrides)
+                                },
+                            )
+                            ResourceTab.Templates -> TemplatesPage(
+                                templates = state.templates,
+                                profiles = state.profiles,
+                                downloading = remoteDownloading,
+                                progress = remoteProgress,
+                                status = remoteStatus,
+                                error = remoteError,
+                                onAdd = { showRemoteConfigDialog = true; remoteError = null },
+                                onPreview = { templateToPreview = it },
+                                onCreate = { templateToCreate = it },
+                                onRename = { templateToRename = it },
+                                onDelete = { templateToDelete = it },
+                                onExport = { template -> templateExportContent = template.rawYaml; saveTemplateLauncher.launch(template.fileName) },
+                                modifier = Modifier.weight(1f),
+                            )
                         }
                     }
-                    AppPage.Config -> Column(Modifier.fillMaxSize()) {
+                    AppPage.Share -> Column(Modifier.fillMaxSize()) {
                         SegmentedTabs(ConfigTab.entries.map { it.label }, configTab.ordinal) { configTab = ConfigTab.entries[it] }
                         when (configTab) {
                             ConfigTab.Rules -> RulesPage(
@@ -430,21 +464,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                     }
-                    AppPage.Templates -> TemplatesPage(
-                        templates = state.templates,
-                        profiles = state.profiles,
-                        downloading = remoteDownloading,
-                        progress = remoteProgress,
-                        status = remoteStatus,
-                        error = remoteError,
-                        onAdd = { showRemoteConfigDialog = true; remoteError = null },
-                        onPreview = { templateToPreview = it },
-                        onCreate = { templateToCreate = it },
-                        onRename = { templateToRename = it },
-                        onDelete = { templateToDelete = it },
-                        onExport = { template -> templateExportContent = template.rawYaml; saveTemplateLauncher.launch(template.fileName) },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+
                 } }
             }
         }
@@ -462,7 +482,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     templateToCreate?.let { template -> TemplateCreateDialog(template, onDismiss = { templateToCreate = null }, onCreate = { name, fileName ->
         viewModel.createProfileFromTemplate(name, fileName, template.id)
         templateToCreate = null
-        page = AppPage.Config
+        page = AppPage.Share
         configTab = ConfigTab.Rules
     }) }
     templateToRename?.let { template -> TemplateRenameDialog(template, onDismiss = { templateToRename = null }, onRename = { name ->
@@ -501,10 +521,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     if (showExportSetup) ExportSetupDialog(
         state = state,
         options = exportOptions,
-        excludedNodeIds = state.nodes.filter { it.id !in profile.enabledNodeIds }.map { it.id }.toSet(),
-        regionOverrides = profile.regionOverrides,
-        onToggleNode = { id -> viewModel.toggleNode(id) },
-        onRegionChange = { id, key -> viewModel.updateExportSettings(profile.sourceMode, profile.enabledRegions, profile.regionOverrides + (id to key)) },
         onToggleRegion = { key -> viewModel.updateExportSettings(profile.sourceMode, if (key in profile.enabledRegions) profile.enabledRegions - key else profile.enabledRegions + key, profile.regionOverrides) },
         onDismiss = { showExportSetup = false },
     )
@@ -556,9 +572,14 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
 }
 
 @Composable
-private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: Modifier = Modifier) {
+private fun HomePage(
+    state: AppState,
+    onNavigate: (AppPage) -> Unit,
+    onOpenTemplates: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val profile = state.activeProfile
-    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("配置一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
@@ -566,8 +587,8 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
             }
         }
         item {
-            Card(onClick = { onNavigate(AppPage.Config) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Card(onClick = { onNavigate(AppPage.Share) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(Modifier.fillMaxWidth().padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("当前配置", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -576,20 +597,20 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
                         Icon(Icons.Outlined.Description, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
                     }
                     Text("${profile.enabledNodeIds.size} 个节点  ·  ${profile.ruleProfile.rules.size} 条规则  ·  ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("编辑配置  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("打开规则与分享  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("订阅来源", "${state.sources.size}", "${profile.selectedSourceIds.size} 个用于此配置", Modifier.weight(1f), AppPage.Resources, onNavigate)
-                MetricCard("节点资源", "${state.nodes.size}", "${profile.enabledNodeIds.size} 个已启用", Modifier.weight(1f), AppPage.Resources, onNavigate)
+                MetricCard("订阅来源", "${state.sources.size}", "${profile.selectedSourceIds.size} 个用于此配置", Modifier.weight(1f)) { onNavigate(AppPage.Resources) }
+                MetricCard("节点资源", "${state.nodes.size}", "${profile.enabledNodeIds.size} 个已启用", Modifier.weight(1f)) { onNavigate(AppPage.Resources) }
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("分流规则", "${profile.ruleProfile.rules.size}", "${profile.ruleProfile.groups.size} 个策略组", Modifier.weight(1f), AppPage.Config, onNavigate)
-                MetricCard("本地模板", "${state.templates.size}", "可作为新配置起点", Modifier.weight(1f), AppPage.Templates, onNavigate)
+                MetricCard("分流规则", "${profile.ruleProfile.rules.size}", "${profile.ruleProfile.groups.size} 个策略组", Modifier.weight(1f)) { onNavigate(AppPage.Share) }
+                MetricCard("本地模板", "${state.templates.size}", "可作为新配置起点", Modifier.weight(1f), onOpenTemplates)
             }
         }
         item {
@@ -600,9 +621,9 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
                 Column {
                     DashboardAction("订阅与节点", "管理来源和可用节点", Icons.Outlined.Devices) { onNavigate(AppPage.Resources) }
                     androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
-                    DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Config) }
+                    DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Share) }
                     androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
-                    DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen) { onNavigate(AppPage.Templates) }
+                    DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen, onOpenTemplates)
                 }
             }
         }
@@ -610,9 +631,9 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
 }
 
 @Composable
-private fun MetricCard(title: String, value: String, detail: String, modifier: Modifier, destination: AppPage, onNavigate: (AppPage) -> Unit) {
-    Card(onClick = { onNavigate(destination) }, modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+private fun MetricCard(title: String, value: String, detail: String, modifier: Modifier, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -635,11 +656,11 @@ private fun DashboardAction(title: String, detail: String, icon: androidx.compos
 @Composable
 private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
-    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("订阅资源", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("订阅资源", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                     Text("当前配置启用 ${profile.selectedSourceIds.size} / ${state.sources.size}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 OutlinedButton(onClick = { viewModel.refreshAllSources() }, enabled = state.sources.isNotEmpty() && viewModel.refreshingSourceIds.isEmpty()) {
@@ -652,7 +673,7 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
         if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "添加机场订阅，或到“节点”页直接导入节点链接。", onAdd) }
         items(state.sources, key = { it.id }) { source ->
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(source.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
@@ -679,50 +700,94 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
 }
 
 @Composable
-private fun NodesPage(state: AppState, viewModel: AppViewModel, modifier: Modifier = Modifier, onAdd: () -> Unit) {
-    var filter by remember { mutableStateOf("") }
+private fun NodesPage(
+    state: AppState,
+    viewModel: AppViewModel,
+    modifier: Modifier = Modifier,
+    onAdd: () -> Unit,
+    onRegionChange: (String, String?) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
     var protocolFilter by remember { mutableStateOf("全部协议") }
     var sourceFilter by remember { mutableStateOf("全部来源") }
     var enabledFilter by remember { mutableStateOf("全部") }
-    var expanded by remember { mutableStateOf(false) }
+    var regionFilter by remember { mutableStateOf("全部地区") }
+    var expandedProtocol by remember { mutableStateOf(false) }
+    var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
     val profile = state.activeProfile
+    val regionKeys = NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER
+    val regions = listOf("全部地区") + regionKeys.map(NodeAutoGroups::title)
+    val protocols = listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted()
     val filtered = state.nodes.filter { node ->
-            (filter.isBlank() || node.name.contains(filter, true) || node.server.contains(filter, true)) &&
+        val selectedRegion = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
+        (query.isBlank() || node.name.contains(query, true) || node.server.contains(query, true)) &&
             (protocolFilter == "全部协议" || node.type.equals(protocolFilter, true)) &&
             (sourceFilter == "全部来源" || (sourceFilter == "手动导入" && node.sourceId == null) || state.sources.firstOrNull { it.id == node.sourceId }?.name == sourceFilter) &&
-            (enabledFilter == "全部" || (node.id in profile.enabledNodeIds) == (enabledFilter == "已启用"))
+            (enabledFilter == "全部" || (node.id in profile.enabledNodeIds) == (enabledFilter == "已启用")) &&
+            (regionFilter == "全部地区" || NodeAutoGroups.title(selectedRegion) == regionFilter)
     }
-    val protocols = listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted()
-    var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
-    Column(modifier.padding(horizontal = 16.dp)) {
-        OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(top = 6.dp), label = { Text("搜索节点名称或服务器") }, singleLine = true)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box {
-                OutlinedButton(onClick = { expanded = true }) { Text(protocolFilter); Icon(Icons.Outlined.KeyboardArrowDown, null) }
-                DropdownMenu(expanded, { expanded = false }) {
-                    protocols.forEach { protocol ->
-                        DropdownMenuItem(text = { Text(protocol) }, onClick = { protocolFilter = protocol; expanded = false })
+    LazyColumn(
+        modifier = modifier.fillMaxSize().padding(horizontal = JichangSpacing.pageHorizontal),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(JichangSpacing.item),
+    ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(JichangSpacing.item)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("节点", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Text("启用状态和地区归属按当前配置保存", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("搜索节点名称或服务器") },
+                    singleLine = true,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) {
+                        OutlinedButton(onClick = { expandedProtocol = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text(protocolFilter, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null)
+                        }
+                        DropdownMenu(expandedProtocol, { expandedProtocol = false }) {
+                            protocols.forEach { protocol -> DropdownMenuItem(text = { Text(protocol) }, onClick = { protocolFilter = protocol; expandedProtocol = false }) }
+                        }
                     }
+                    ChoiceMenu(regionFilter, regions, { regionFilter = it }, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                    ChoiceMenu(sourceFilter, listOf("全部来源", "手动导入") + state.sources.map { it.name }, { sourceFilter = it }, Modifier.weight(1f))
+                    DropdownMenuFilter(enabledFilter, { enabledFilter = it }, Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${filtered.size} 个结果", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), true) }, enabled = filtered.isNotEmpty()) { Text("全部启用") }
+                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), false) }, enabled = filtered.isNotEmpty()) { Text("全部停用") }
                 }
             }
-            DropdownMenuFilter(enabledFilter, { enabledFilter = it })
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), true) }, enabled = filtered.isNotEmpty()) { Text("全开") }
-            TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), false) }, enabled = filtered.isNotEmpty()) { Text("全关") }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ChoiceMenu("来源：$sourceFilter", listOf("全部来源", "手动导入") + state.sources.map { it.name }, { sourceFilter = it }, Modifier.weight(1f))
-            Text("${filtered.size} 个结果", Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (state.nodes.isEmpty()) item { EmptyCard("还没有节点", "导入 Mihomo YAML、Base64 订阅或节点链接。", onAdd) }
+        else if (filtered.isEmpty()) item { EmptyCard("没有匹配的节点", "换个搜索词或清除筛选条件。", onAdd) }
+        else items(filtered, key = { it.id }) { node ->
+            val region = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
+            NodeRow(
+                node = node,
+                enabled = node.id in profile.enabledNodeIds,
+                region = region,
+                onToggle = { viewModel.toggleNode(node.id) },
+                onRegionChange = { onRegionChange(node.id, it) },
+                onDelete = { viewModel.removeNode(node.id) },
+                onEdit = { editingNode = node },
+            )
         }
-        if (state.nodes.isEmpty()) EmptyCard("还没有节点", "导入 Mihomo YAML、Base64 订阅或节点链接。", onAdd)
-        else if (filtered.isEmpty()) EmptyCard("没有匹配的节点", "换个搜索词或清除筛选条件。", onAdd)
-        else LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(filtered, key = { it.id }) { node -> NodeRow(
-                node, node.id in profile.enabledNodeIds,
-                onToggle = { viewModel.toggleNode(node.id) }, onDelete = { viewModel.removeNode(node.id) }, onEdit = { editingNode = node },
-            ) }
+        item {
+            Text(
+                "当前配置启用 ${filtered.count { it.id in profile.enabledNodeIds }} / ${filtered.size} · 共 ${state.nodes.size} 个节点",
+                Modifier.padding(vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        Text("此配置启用 ${filtered.count { it.id in profile.enabledNodeIds }} / ${filtered.size} · 共 ${state.nodes.size} 个节点", Modifier.padding(bottom = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     editingNode?.let { node -> NodeEditDialog(node, onDismiss = { editingNode = null }, onSave = { name, type, server, port, options ->
         viewModel.updateNode(node.id, name, type, server, port, options); editingNode = null
@@ -730,11 +795,17 @@ private fun NodesPage(state: AppState, viewModel: AppViewModel, modifier: Modifi
 }
 
 @Composable
-private fun DropdownMenuFilter(value: String, onValue: (String) -> Unit) {
+private fun DropdownMenuFilter(value: String, onValue: (String) -> Unit, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
-    Box {
-        OutlinedButton(onClick = { expanded = true }) { Text(value); Icon(Icons.Outlined.KeyboardArrowDown, null) }
-        DropdownMenu(expanded, { expanded = false }) { listOf("全部", "已启用", "已停用").forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { onValue(option); expanded = false }) } }
+    Box(modifier) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(value, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null)
+        }
+        DropdownMenu(expanded, { expanded = false }) {
+            listOf("全部", "已启用", "已停用").forEach { option ->
+                DropdownMenuItem(text = { Text(option) }, onClick = { onValue(option); expanded = false })
+            }
+        }
     }
 }
 
@@ -742,22 +813,51 @@ private fun DropdownMenuFilter(value: String, onValue: (String) -> Unit) {
 private fun ChoiceMenu(label: String, options: List<String>, onValue: (String) -> Unit, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text(label, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null) }
-        DropdownMenu(expanded, { expanded = false }) { options.distinct().forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { onValue(option); expanded = false }) } }
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(label, maxLines = 1, modifier = Modifier.weight(1f)); Icon(Icons.Outlined.KeyboardArrowDown, null)
+        }
+        DropdownMenu(expanded, { expanded = false }) {
+            options.distinct().forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { onValue(option); expanded = false }) }
+        }
     }
 }
 
 @Composable
-private fun NodeRow(node: ProxyNode, enabled: Boolean, onToggle: () -> Unit, onDelete: () -> Unit, onEdit: () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(node.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                Text("${node.type.uppercase()} · ${node.server}:${node.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun NodeRow(
+    node: ProxyNode,
+    enabled: Boolean,
+    region: String,
+    onToggle: () -> Unit,
+    onRegionChange: (String?) -> Unit,
+    onDelete: () -> Unit,
+    onEdit: () -> Unit,
+) {
+    var regionMenu by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(node.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                    Text("${node.type.uppercase()} · ${node.server}:${node.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
+                Switch(checked = enabled, onCheckedChange = { onToggle() })
             }
-            Switch(checked = enabled, onCheckedChange = { onToggle() })
-            IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "编辑节点") }
-            IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "删除节点") }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    TextButton(onClick = { regionMenu = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text("地区：${NodeAutoGroups.title(region)}")
+                        Icon(Icons.Outlined.KeyboardArrowDown, null)
+                    }
+                    DropdownMenu(expanded = regionMenu, onDismissRequest = { regionMenu = false }) {
+                        DropdownMenuItem(text = { Text("自动识别 · ${NodeAutoGroups.title(NodeAutoGroups.classify(node.name))}") }, onClick = { onRegionChange(null); regionMenu = false })
+                        (NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER).forEach { key ->
+                            DropdownMenuItem(text = { Text(NodeAutoGroups.title(key)) }, onClick = { onRegionChange(key); regionMenu = false })
+                        }
+                    }
+                }
+                IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "编辑节点") }
+                IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "删除节点") }
+            }
         }
     }
 }
@@ -898,9 +998,9 @@ private fun ExportPage(
     modifier: Modifier = Modifier,
 ) {
     val profile = state.activeProfile
-    Column(modifier.padding(horizontal = 16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(profile.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text("${generatedNodes} 个内嵌节点${if (referencedSubscriptions > 0) " · $referencedSubscriptions 个订阅引用" else ""}${if (skippedNodes > 0) " · 跳过 $skippedNodes 个不支持节点" else ""}", style = MaterialTheme.typography.bodySmall)
                 Text("文件名：$filename", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
@@ -919,25 +1019,27 @@ private fun ExportPage(
             )
         }
         OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("筛选节点与地区策略组")
+            Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = onDownload, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.CloudDownload, null); Spacer(Modifier.width(6.dp)); Text("下载配置") }
-            OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "局域网分享" else "更新分享") }
+            OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "开启局域网分享" else "重新生成链接") }
         }
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        } else Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        }
+        shareUrl?.let { url -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("局域网分享已开启", style = MaterialTheme.typography.titleSmall)
-                SelectionContainer { Text(shareUrl, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
-                Text("接收设备需连接同一局域网。随机链接包含访问凭据，请只分享给信任的人。", style = MaterialTheme.typography.bodySmall)
+                LanShareQrCodeCard(url)
+                SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
+                Text("接收设备需连接同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onShareLink, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
                     TextButton(onClick = onStopShare) { Text("停止") }
                 }
             }
-        }
+        } }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("配置预览", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             Text("YAML", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
@@ -948,6 +1050,34 @@ private fun ExportPage(
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun LanShareQrCodeCard(url: String) {
+    val result by produceState<Result<Bitmap>?>(initialValue = null, key1 = url) {
+        value = withContext(Dispatchers.Default) { runCatching { LanShareQrCode.createBitmap(url) } }
+    }
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        when {
+            result == null -> CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp)
+            result!!.isSuccess -> Image(
+                bitmap = result!!.getOrThrow().asImageBitmap(),
+                contentDescription = "局域网配置下载二维码",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(232.dp).clip(RoundedCornerShape(12.dp)),
+            )
+            else -> Text(
+                "二维码生成失败，可使用下方链接分享。",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Text("用同一局域网内的设备扫描下载配置", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -967,10 +1097,10 @@ private fun TemplatesPage(
     onExport: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("配置模板", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("配置模板", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text("从远程 Mihomo YAML 创建本地模板，再用它快速建立可编辑配置。模板仅保存在此设备。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(onClick = onAdd, enabled = !downloading, modifier = Modifier.fillMaxWidth()) {
                     if (downloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
@@ -991,7 +1121,7 @@ private fun TemplatesPage(
         items(templates, key = { it.id }) { template ->
             val users = profiles.count { it.templateId == template.id }
             Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
                         Spacer(Modifier.width(12.dp))
@@ -1138,7 +1268,7 @@ private fun SourceModeCard(title: String, detail: String, selected: Boolean, mod
 @Composable
 private fun HeaderCard(title: String, detail: String) {
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(detail, style = MaterialTheme.typography.bodySmall)
         }
@@ -1540,56 +1670,47 @@ private fun NodeEditDialog(node: ProxyNode, onDismiss: () -> Unit, onSave: (Stri
 private fun ExportSetupDialog(
     state: AppState,
     options: ConfigExportOptions,
-    excludedNodeIds: Set<String>,
-    regionOverrides: Map<String, String>,
-    onToggleNode: (String) -> Unit,
-    onRegionChange: (String, String) -> Unit,
     onToggleRegion: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val enabledSourceIds = state.activeProfile.selectedSourceIds
-    val nodes = state.nodes.filter { it.sourceId == null || it.sourceId in enabledSourceIds }
+    val profile = state.activeProfile
+    val enabledSourceIds = profile.selectedSourceIds
+    val nodes = state.nodes.filter { node ->
+        (node.sourceId == null || node.sourceId in enabledSourceIds) && node.id in profile.enabledNodeIds
+    }
+    val regions = NodeAutoGroups.regions.map { it.key to it.title } + (NodeAutoGroups.OTHER to "其他")
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("筛选节点与策略组") },
-        text = { Column(Modifier.height(480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("自动根据节点名称归类。你可以关闭某个地区组、排除节点或手动调整归属。", style = MaterialTheme.typography.bodySmall)
-            Text("地区策略组", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            NodeAutoGroups.regions.forEach { region ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = region.key in options.enabledRegions, onCheckedChange = { onToggleRegion(region.key) })
-                    Text(region.title)
-                    Spacer(Modifier.weight(1f))
-                    Text(nodes.count { (regionOverrides[it.id] ?: NodeAutoGroups.classify(it.name)) == region.key }.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = NodeAutoGroups.OTHER in options.enabledRegions, onCheckedChange = { onToggleRegion(NodeAutoGroups.OTHER) })
-                Text("其他")
-                Spacer(Modifier.weight(1f))
-                Text(nodes.count { (regionOverrides[it.id] ?: NodeAutoGroups.classify(it.name)) == NodeAutoGroups.OTHER }.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Text("包含节点", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
-            nodes.forEach { node ->
-                var expanded by remember(node.id) { mutableStateOf(false) }
-                val selectedRegion = regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = node.id !in excludedNodeIds, onCheckedChange = { onToggleNode(node.id) })
-                    Column(Modifier.weight(1f)) {
-                        Text(node.name, style = MaterialTheme.typography.bodyMedium)
-                        Text("${node.type.uppercase()} · ${node.server}:${node.port}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Box {
-                        TextButton(onClick = { expanded = true }) { Text(NodeAutoGroups.title(selectedRegion)) }
-                        DropdownMenu(expanded, { expanded = false }) {
-                            (NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER).forEach { key ->
-                                DropdownMenuItem(text = { Text(NodeAutoGroups.title(key)) }, onClick = { onRegionChange(node.id, key); expanded = false })
-                            }
-                        }
+        title = { Text("导出地区策略组") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "选择要生成的地区策略组。节点启用和地区归属请在“资源 → 节点”中管理。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                regions.forEach { (key, title) ->
+                    Row(
+                        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = key in options.enabledRegions, onCheckedChange = { onToggleRegion(key) })
+                        Text(title, Modifier.weight(1f).clickable { onToggleRegion(key) }, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            nodes.count { node ->
+                                (profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)) == key
+                            }.toString(),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
-        } },
+        },
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
     )
 }

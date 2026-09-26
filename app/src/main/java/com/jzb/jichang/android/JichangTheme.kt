@@ -29,6 +29,14 @@ private val LightColors = lightColorScheme(
     error = Color(0xFFBA1A1A),
 )
 
+internal object JichangSpacing {
+    val pageHorizontal = 16.dp
+    val pageVertical = 12.dp
+    val section = 16.dp
+    val item = 8.dp
+    val card = 16.dp
+}
+
 @Composable
 fun JichangTheme(glassOpacity: Float = 0.45f, content: @Composable () -> Unit) {
     MaterialTheme(
