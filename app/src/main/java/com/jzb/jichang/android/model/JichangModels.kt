@@ -4,6 +4,7 @@ data class SubscriptionSource(
     val id: String,
     val name: String,
     val url: String,
+    /** Kept for reading version-1 snapshots. Selection is now stored on ConfigProfile. */
     val enabled: Boolean = true,
     val providerCompatible: Boolean? = null,
     val updatedAt: Long? = null,
@@ -17,6 +18,7 @@ data class ProxyNode(
     val type: String,
     val server: String,
     val port: Int,
+    /** Kept for migration from version-1 snapshots; use ConfigProfile.enabledNodeIds. */
     val enabled: Boolean = true,
     val options: Map<String, Any?> = emptyMap(),
 )
@@ -27,22 +29,72 @@ data class PolicyGroup(
     val members: List<String> = emptyList(),
 )
 
+/** A serializable rule condition. Groups use operator=AND/OR/NOT; leaves use type/value. */
+data class RuleCondition(
+    val operator: String? = null,
+    val type: String? = null,
+    val value: String = "",
+    val argument: String? = null,
+    val noResolve: Boolean = false,
+    val source: Boolean = false,
+    val children: List<RuleCondition> = emptyList(),
+)
+
 data class RoutingRule(
     val type: String,
     val value: String,
     val group: String,
     val noResolve: Boolean = false,
+    val source: Boolean = false,
+    val conditions: List<RuleCondition> = emptyList(),
+)
+
+data class RuleProvider(
+    val id: String,
+    val name: String,
+    val type: String = "http",
+    val url: String = "",
+    val path: String = "",
+    val interval: Int = 86400,
+    val behavior: String = "domain",
+    val format: String = "yaml",
+    val payload: List<String> = emptyList(),
+    val headers: Map<String, List<String>> = emptyMap(),
+)
+
+data class SubRuleProfile(
+    val name: String,
+    val rules: List<RoutingRule> = emptyList(),
 )
 
 data class RuleProfile(
-    val groups: List<PolicyGroup> = listOf(PolicyGroup("PROXY", members = emptyList())),
+    val groups: List<PolicyGroup> = listOf(PolicyGroup("PROXY")),
     val rules: List<RoutingRule> = emptyList(),
+    val providers: List<RuleProvider> = emptyList(),
+    val subRules: List<SubRuleProfile> = emptyList(),
+)
+
+data class ConfigProfile(
+    val id: String,
+    val name: String,
+    val fileName: String = name,
+    val selectedSourceIds: Set<String> = emptySet(),
+    val enabledNodeIds: Set<String> = emptySet(),
+    val ruleProfile: RuleProfile = RuleProfile(),
+    val sourceMode: String = "EMBED_NODES",
+    val enabledRegions: Set<String> = setOf("hk", "tw", "jp", "sg", "us", "kr", "other"),
+    val regionOverrides: Map<String, String> = emptyMap(),
 )
 
 data class AppState(
     val sources: List<SubscriptionSource> = emptyList(),
     val nodes: List<ProxyNode> = emptyList(),
-    val ruleProfile: RuleProfile = RuleProfile(),
-)
+    val profiles: List<ConfigProfile> = listOf(ConfigProfile("default", "默认配置")),
+    val activeProfileId: String = "default",
+) {
+    val activeProfile: ConfigProfile
+        get() = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull() ?: ConfigProfile("default", "默认配置")
+    val ruleProfile: RuleProfile get() = activeProfile.ruleProfile
+}
 
 data class ParseResult(val nodes: List<ProxyNode>, val skippedCount: Int)

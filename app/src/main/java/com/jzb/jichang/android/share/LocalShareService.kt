@@ -21,7 +21,7 @@ import java.util.Base64
 class LocalShareService : Service() {
     private val binder = LocalBinder()
     private var server: ConfigServer? = null
-    @Volatile private var sharedConfig: String? = null
+    @Volatile private var sharedConfig: Pair<String, String>? = null
     var currentUrl: String? = null
         private set
 
@@ -45,13 +45,13 @@ class LocalShareService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
-    fun startSharing(config: String): String {
+    fun startSharing(config: String, filename: String): String {
         stopSharing()
         val address = findLanAddress() ?: error("没有找到局域网地址，请连接 Wi-Fi 或有线网络")
         val tokenBytes = ByteArray(18).also(SecureRandom()::nextBytes)
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes)
-        sharedConfig = config
-        val active = ConfigServer(address, token) { sharedConfig.orEmpty() }
+        sharedConfig = config to filename
+        val active = ConfigServer(address, token) { sharedConfig ?: ("" to "鸡场.yaml") }
         active.start(5_000, false)
         server = active
         currentUrl = "http://$address:${active.listeningPort}/$token/config.yaml"
@@ -65,7 +65,7 @@ class LocalShareService : Service() {
         currentUrl = null
     }
 
-    fun updateConfig(config: String) { if (currentUrl != null) sharedConfig = config }
+    fun updateConfig(config: String, filename: String) { if (currentUrl != null) sharedConfig = config to filename }
 
     override fun onDestroy() {
         stopSharing()
@@ -126,7 +126,7 @@ class LocalShareService : Service() {
         }
     }
 
-    private class ConfigServer(host: String, private val token: String, private val config: () -> String) : NanoHTTPD(host, 0) {
+    private class ConfigServer(host: String, private val token: String, private val config: () -> Pair<String, String>) : NanoHTTPD(host, 0) {
         override fun serve(session: IHTTPSession): Response {
             if (session.method != Method.GET) return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed")
             val expected = "/$token/config.yaml"
@@ -134,9 +134,11 @@ class LocalShareService : Service() {
             if (!MessageDigest.isEqual(expected.toByteArray(), actual.toByteArray())) {
                 return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
             }
-            return newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", config()).apply {
+            val (yaml, filename) = config()
+            return newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", yaml).apply {
                 addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
                 addHeader("X-Content-Type-Options", "nosniff")
+                addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")
             }
         }
     }

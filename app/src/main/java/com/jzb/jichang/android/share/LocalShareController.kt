@@ -15,14 +15,14 @@ class LocalShareController(context: Context) {
     private val mutableError = MutableStateFlow<String?>(null)
     val url: StateFlow<String?> = mutableUrl
     val error: StateFlow<String?> = mutableError
-    private var pendingConfig: String? = null
+    private var pendingConfig: Pair<String, String>? = null
     private var bound = false
     private var service: LocalShareService? = null
     private val connection: ServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as? LocalShareService.LocalBinder)?.service()
             val activeService = service ?: return
-            runCatching { pendingConfig?.let(activeService::startSharing) ?: activeService.currentUrl }
+            runCatching { pendingConfig?.let { activeService.startSharing(it.first, it.second) } ?: activeService.currentUrl }
                 .onSuccess { mutableUrl.value = it; mutableError.value = null }
                 .onFailure { error ->
                     mutableUrl.value = null
@@ -37,8 +37,8 @@ class LocalShareController(context: Context) {
         override fun onServiceDisconnected(name: ComponentName?) { service = null; mutableUrl.value = null }
     }
 
-    fun start(config: String) {
-        pendingConfig = config
+    fun start(config: String, filename: String) {
+        pendingConfig = config to filename
         mutableError.value = null
         val intent = Intent(appContext, LocalShareService::class.java)
         ContextCompat.startForegroundService(appContext, intent)
@@ -59,7 +59,7 @@ class LocalShareController(context: Context) {
         mutableError.value = null
     }
 
-    fun updateConfig(config: String) { service?.updateConfig(config) }
+    fun updateConfig(config: String, filename: String) { service?.updateConfig(config, filename) }
 
     fun onResume() {
         if (bound && service != null) mutableUrl.value = service?.currentUrl

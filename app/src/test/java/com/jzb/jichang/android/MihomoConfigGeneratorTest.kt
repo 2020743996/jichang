@@ -1,9 +1,12 @@
 package com.jzb.jichang.android
 
 import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.ConfigProfile
 import com.jzb.jichang.android.model.PolicyGroup
 import com.jzb.jichang.android.model.ProxyNode
 import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.model.RuleCondition
+import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubscriptionSource
 import com.jzb.jichang.android.service.ConfigExportOptions
@@ -25,9 +28,9 @@ class MihomoConfigGeneratorTest {
             options = mapOf("type" to "trojan", "password" to "secret", "tls" to true),
         )
         val disabled = node.copy(id = "2", name = "disabled", enabled = false)
-        val state = AppState(
+        val state = profileState(
             nodes = listOf(node, disabled),
-            ruleProfile = com.jzb.jichang.android.model.RuleProfile(
+            ruleProfile = RuleProfile(
                 groups = listOf(PolicyGroup("PROXY", members = listOf("Node: one"))),
                 rules = listOf(RoutingRule("DOMAIN-SUFFIX", "example.com", "PROXY")),
             ),
@@ -48,7 +51,7 @@ class MihomoConfigGeneratorTest {
     @Test fun sanitizesUntrustedNamesAndCountsUnsupportedProtocols() {
         val unsafe = ProxyNode("1", null, "safe\nMATCH,example.org,DIRECT", "ss", "node.example", 443)
         val unsupported = ProxyNode("2", null, "unsupported", "ssr", "node.example", 443)
-        val output = MihomoConfigGenerator().generate(AppState(nodes = listOf(unsafe, unsupported)))
+        val output = MihomoConfigGenerator().generate(profileState(nodes = listOf(unsafe, unsupported)))
         @Suppress("UNCHECKED_CAST")
         val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
         val proxies = root["proxies"] as List<Map<String, Any?>>
@@ -63,7 +66,7 @@ class MihomoConfigGeneratorTest {
     @Test fun buildsRegionGroupsAndKeepsMihomoMatchAsLastRule() {
         val hongKong = ProxyNode("hk", null, "香港 01", "ss", "hk.example", 443)
         val japan = ProxyNode("jp", null, "Tokyo JP", "trojan", "jp.example", 443)
-        val state = AppState(
+        val state = profileState(
             nodes = listOf(hongKong, japan),
             ruleProfile = RuleProfile(
                 groups = listOf(PolicyGroup("PROXY")),
@@ -94,11 +97,11 @@ class MihomoConfigGeneratorTest {
         val hk = ProxyNode("hk", source.id, "香港高速", "ss", "hk.example", 443)
         val local = ProxyNode("local", null, "自建节点", "trojan", "local.example", 443)
         val parsedText = ProxyNode("text", textSource.id, "日本线路", "vmess", "jp.example", 443)
-        val state = AppState(sources = listOf(source, textSource), nodes = listOf(hk, local, parsedText))
+        val state = profileState(sources = listOf(source, textSource), nodes = listOf(hk, local, parsedText))
 
         val output = MihomoConfigGenerator().generate(
             state,
-            ConfigExportOptions(sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, excludedNodeIds = setOf(hk.id)),
+            ConfigExportOptions(sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, excludedNodeIds = setOf(hk.id), selectedSourceIds = setOf(source.id, textSource.id), enabledNodeIds = setOf(hk.id, local.id, parsedText.id)),
         )
         @Suppress("UNCHECKED_CAST")
         val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
@@ -120,7 +123,7 @@ class MihomoConfigGeneratorTest {
     @Test fun providerNumberingSkipsSubscriptionsThatCannotBeReferenced() {
         val textSource = SubscriptionSource("text", "普通订阅", "https://sub.example/text", providerCompatible = false)
         val mihomoSource = SubscriptionSource("mihomo", "Mihomo 订阅", "https://sub.example/mihomo", providerCompatible = true)
-        val state = AppState(
+        val state = profileState(
             sources = listOf(textSource, mihomoSource),
             nodes = listOf(
                 ProxyNode("text-node", textSource.id, "手动回退节点", "ss", "text.example", 443),
@@ -130,7 +133,7 @@ class MihomoConfigGeneratorTest {
 
         val output = MihomoConfigGenerator().generate(
             state,
-            ConfigExportOptions(sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS),
+            ConfigExportOptions(sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, selectedSourceIds = setOf(textSource.id, mihomoSource.id), enabledNodeIds = setOf("text-node", "mihomo-node")),
         )
         @Suppress("UNCHECKED_CAST")
         val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
@@ -142,5 +145,50 @@ class MihomoConfigGeneratorTest {
         assertEquals(setOf("订阅-1"), providers.keys)
         assertEquals("https://sub.example/mihomo", providers.getValue("订阅-1")["url"])
         assertEquals(setOf("手动回退节点"), proxies.map { it["name"] }.toSet())
+    }
+
+    @Test fun profileSelectionIsIndependentAndVisualRuleTypesSerialize() {
+        val firstNode = ProxyNode("first", null, "东京线路", "ss", "tokyo.example", 443)
+        val secondNode = firstNode.copy(id = "second", name = "香港线路", server = "hk.example")
+        val profileA = ConfigProfile(
+            id = "a", name = "A", enabledNodeIds = setOf(firstNode.id),
+            ruleProfile = RuleProfile(
+                groups = listOf(PolicyGroup("PROXY")),
+                providers = listOf(RuleProvider("ads", "ads", type = "inline", behavior = "domain", payload = listOf("ads.example"))),
+                rules = listOf(
+                    RoutingRule("RULE-SET", "ads", "REJECT"),
+                    RoutingRule("AND", "", "PROXY", conditions = listOf(
+                        RuleCondition(type = "DOMAIN-SUFFIX", value = "example.com"),
+                        RuleCondition(type = "NETWORK", value = "udp"),
+                    )),
+                ),
+            ),
+        )
+        val profileB = ConfigProfile(id = "b", name = "B", enabledNodeIds = setOf(secondNode.id))
+        val state = AppState(nodes = listOf(firstNode, secondNode), profiles = listOf(profileA, profileB), activeProfileId = profileA.id)
+        val output = MihomoConfigGenerator().generate(state)
+        @Suppress("UNCHECKED_CAST")
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
+        val proxies = root["proxies"] as List<Map<String, Any?>>
+        val rules = root["rules"] as List<String>
+        assertEquals(listOf("东京线路"), proxies.map { it["name"] })
+        assertTrue(rules.contains("RULE-SET,ads,REJECT"))
+        assertTrue(rules.contains("AND,((DOMAIN-SUFFIX,example.com),(NETWORK,udp)),PROXY"))
+        assertEquals(listOf("香港线路"), MihomoConfigGenerator().generate(state, profileB).let {
+            @Suppress("UNCHECKED_CAST")
+            (Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(it.yaml)["proxies"] as List<Map<String, Any?>>).map { node -> node["name"] }
+        })
+    }
+
+    private fun profileState(
+        nodes: List<ProxyNode> = emptyList(),
+        sources: List<SubscriptionSource> = emptyList(),
+        ruleProfile: RuleProfile = RuleProfile(),
+    ): AppState {
+        val profile = ConfigProfile(
+            id = "test", name = "Test", selectedSourceIds = sources.map { it.id }.toSet(),
+            enabledNodeIds = nodes.filter { it.enabled }.map { it.id }.toSet(), ruleProfile = ruleProfile,
+        )
+        return AppState(sources, nodes, listOf(profile), profile.id)
     }
 }

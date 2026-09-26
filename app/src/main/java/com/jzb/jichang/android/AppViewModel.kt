@@ -9,6 +9,9 @@ import androidx.compose.runtime.setValue
 import com.jzb.jichang.android.data.JichangDatabase
 import com.jzb.jichang.android.data.JichangRepository
 import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.ConfigProfile
+import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.service.GeneratedConfig
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.ConfigExportOptions
@@ -24,11 +27,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var generated: GeneratedConfig = generator.generate(AppState())
         private set
+    var refreshingSourceIds: Set<String> by mutableStateOf(emptySet())
+        private set
 
-    fun generate(options: ConfigExportOptions = ConfigExportOptions()): GeneratedConfig {
-        generated = generator.generate(state.value, options)
+    fun generate(profile: ConfigProfile = state.value.activeProfile): GeneratedConfig {
+        generated = generator.generate(state.value, profile)
         return generated
     }
+
+    fun createProfile(name: String, fileName: String, copyActive: Boolean) = run { repository.createProfile(name, fileName, copyActive); "配置已创建并切换" }
+    fun switchProfile(id: String) = run { repository.switchProfile(id); null }
+    fun updateProfile(id: String, name: String, fileName: String) = run { repository.updateProfile(id, name, fileName); "配置已保存" }
+    fun deleteProfile(id: String) = run { repository.deleteProfile(id); "配置已删除" }
 
     fun run(action: suspend () -> String?) {
         viewModelScope.launch {
@@ -48,8 +58,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshSource(id: String) = run {
-        val skipped = repository.refreshSource(id)
-        "订阅已更新；跳过 $skipped 条无法识别的记录"
+        refreshingSourceIds = refreshingSourceIds + id
+        try { val skipped = repository.refreshSource(id); "订阅已更新；跳过 $skipped 条无法识别的记录" }
+        finally { refreshingSourceIds = refreshingSourceIds - id }
+    }
+    fun refreshAllSources() = run {
+        val total = state.value.sources.size
+        if (total == 0) return@run "没有可刷新的订阅"
+        val (ok, failed) = repository.refreshAllSources { id -> refreshingSourceIds = if (id.isBlank()) emptySet() else setOf(id) }
+        "批量刷新完成：成功 $ok 个，失败 $failed 个"
     }
     fun toggleSource(id: String) = run { repository.toggleSource(id); null }
     fun removeSource(id: String) = run { repository.removeSource(id); "订阅已删除" }
@@ -58,14 +75,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         "已添加 $count 个节点；跳过 $skipped 条"
     }
     fun toggleNode(id: String) = run { repository.toggleNode(id); null }
+    fun setNodeEnabled(id: String, enabled: Boolean) = run { repository.toggleNode(id, enabled); null }
+    fun setNodesEnabled(ids: Set<String>, enabled: Boolean) = run { repository.setNodesEnabled(ids, enabled); "已${if (enabled) "启用" else "停用"} ${ids.size} 个节点" }
+    fun updateNode(id: String, name: String, type: String, server: String, port: Int, options: Map<String, Any?>) = run { repository.updateNode(id, name, type, server, port, options); "节点已保存" }
     fun removeNode(id: String) = run { repository.removeNode(id); "节点已删除" }
     fun addGroup(name: String, type: String, members: List<String>) = run { repository.addGroup(name, type, members); "策略组已添加" }
     fun updateGroup(oldName: String, name: String, type: String, members: List<String>) = run { repository.updateGroup(oldName, name, type, members); "策略组已更新" }
     fun removeGroup(name: String) = run { repository.removeGroup(name); "策略组已删除" }
-    fun addRule(type: String, value: String, group: String, noResolve: Boolean = false) = run { repository.addRule(type, value, group, noResolve); "规则已添加" }
-    fun updateRule(index: Int, type: String, value: String, group: String, noResolve: Boolean) = run { repository.updateRule(index, type, value, group, noResolve); "规则已更新" }
+    fun addRule(rule: RoutingRule) = run { repository.addRule(rule); "规则已添加" }
+    fun updateRule(index: Int, rule: RoutingRule) = run { repository.updateRule(index, rule); "规则已更新" }
     fun moveRule(index: Int, offset: Int) = run { repository.moveRule(index, offset); "规则顺序已更新" }
     fun removeRule(index: Int) = run { repository.removeRule(index); "规则已删除" }
+    fun saveRuleProfile(profile: RuleProfile) = run { repository.saveRuleProfile(profile); "规则集配置已保存" }
+    fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = run { repository.updateExportSettings(sourceMode, enabledRegions, regionOverrides); null }
 
     override fun onCleared() {
         repository.close()
