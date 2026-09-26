@@ -1,6 +1,6 @@
-package com.jzb.tower.android
+package com.jzb.jichang.android
 
-import com.jzb.tower.android.service.SubscriptionParser
+import com.jzb.jichang.android.service.SubscriptionParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

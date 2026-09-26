@@ -1,14 +1,14 @@
-package com.jzb.tower.android.data
+package com.jzb.jichang.android.data
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.model.PolicyGroup
-import com.jzb.tower.android.model.ProxyNode
-import com.jzb.tower.android.model.RoutingRule
-import com.jzb.tower.android.model.SubscriptionSource
-import com.jzb.tower.android.service.SubscriptionParser
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.PolicyGroup
+import com.jzb.jichang.android.model.ProxyNode
+import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.model.SubscriptionSource
+import com.jzb.jichang.android.service.SubscriptionParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,7 +26,7 @@ import java.net.URI
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class TowerRepository(private val dao: SnapshotDao) {
+class JichangRepository(private val dao: SnapshotDao) {
     private val gson: Gson = GsonBuilder().serializeNulls().create()
     private val stateType = object : TypeToken<AppState>() {}.type
     private val lock = Mutex()

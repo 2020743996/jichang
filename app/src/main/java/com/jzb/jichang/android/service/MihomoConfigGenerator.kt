@@ -1,7 +1,7 @@
-package com.jzb.tower.android.service
+package com.jzb.jichang.android.service
 
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.model.ProxyNode
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.ProxyNode
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
 import java.util.LinkedHashMap
@@ -33,7 +33,7 @@ class MihomoConfigGenerator {
         val nodeNames = names.toSet()
         val nodeNamesByID = exportable.mapIndexed { index, node -> "node:${node.id}" to names[index] }.toMap()
         val configuredGroups = state.ruleProfile.groups.filter { it.name.isNotBlank() }
-        val groups = if (configuredGroups.isEmpty()) listOf(com.jzb.tower.android.model.PolicyGroup("PROXY")) else configuredGroups
+        val groups = if (configuredGroups.isEmpty()) listOf(com.jzb.jichang.android.model.PolicyGroup("PROXY")) else configuredGroups
         val groupNames = groups.map { it.name }.toSet()
         val groupYaml = groups.map { group ->
             val configuredMembers = if (group.members.isEmpty()) names else group.members.map { member ->

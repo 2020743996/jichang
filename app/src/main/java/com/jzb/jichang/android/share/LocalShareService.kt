@@ -1,4 +1,4 @@
-package com.jzb.tower.android.share
+package com.jzb.jichang.android.share
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -10,7 +10,7 @@ import android.graphics.drawable.Icon
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
-import com.jzb.tower.android.MainActivity
+import com.jzb.jichang.android.MainActivity
 import fi.iki.elonen.NanoHTTPD
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -142,8 +142,8 @@ class LocalShareService : Service() {
     }
 
     companion object {
-        const val ACTION_STOP = "com.jzb.tower.android.action.STOP_SHARE"
-        private const val CHANNEL_ID = "tower-local-share"
+        const val ACTION_STOP = "com.jzb.jichang.android.action.STOP_SHARE"
+        private const val CHANNEL_ID = "jichang-local-share"
         private const val NOTIFICATION_ID = 5401
     }
 }

@@ -1,10 +1,10 @@
-package com.jzb.tower.android
+package com.jzb.jichang.android
 
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.model.PolicyGroup
-import com.jzb.tower.android.model.ProxyNode
-import com.jzb.tower.android.model.RoutingRule
-import com.jzb.tower.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.PolicyGroup
+import com.jzb.jichang.android.model.ProxyNode
+import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.service.MihomoConfigGenerator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,7 +22,7 @@ class MihomoConfigGeneratorTest {
         val disabled = node.copy(id = "2", name = "disabled", enabled = false)
         val state = AppState(
             nodes = listOf(node, disabled),
-            ruleProfile = com.jzb.tower.android.model.RuleProfile(
+            ruleProfile = com.jzb.jichang.android.model.RuleProfile(
                 groups = listOf(PolicyGroup("PROXY", members = listOf("Node: one"))),
                 rules = listOf(RoutingRule("DOMAIN-SUFFIX", "example.com", "PROXY")),
             ),

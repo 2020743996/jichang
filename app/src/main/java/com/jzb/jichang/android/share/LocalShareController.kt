@@ -1,4 +1,4 @@
-package com.jzb.tower.android.share
+package com.jzb.jichang.android.share
 
 import android.content.ComponentName
 import android.content.Context

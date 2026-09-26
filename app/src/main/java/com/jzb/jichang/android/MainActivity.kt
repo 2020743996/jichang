@@ -1,4 +1,4 @@
-package com.jzb.tower.android
+package com.jzb.jichang.android
 
 import android.content.Intent
 import android.net.Uri
@@ -76,11 +76,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.model.ProxyNode
-import com.jzb.tower.android.model.PolicyGroup
-import com.jzb.tower.android.service.MihomoConfigGenerator
-import com.jzb.tower.android.share.LocalShareController
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.ProxyNode
+import com.jzb.jichang.android.model.PolicyGroup
+import com.jzb.jichang.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
-        setContent { TowerApp() }
+        setContent { JichangApp() }
     }
 }
 
@@ -100,7 +100,7 @@ private enum class DialogKind { Source, Node, Group, Rule }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TowerApp(viewModel: AppViewModel = viewModel()) {
+private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var page by remember { mutableStateOf(AppPage.Sources) }

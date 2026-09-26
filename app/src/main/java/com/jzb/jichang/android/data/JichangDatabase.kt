@@ -1,4 +1,4 @@
-package com.jzb.tower.android.data
+package com.jzb.jichang.android.data
 
 import android.content.Context
 import androidx.room.Dao
@@ -25,13 +25,13 @@ interface SnapshotDao {
 }
 
 @Database(entities = [SnapshotEntity::class], version = 1, exportSchema = false)
-abstract class TowerDatabase : RoomDatabase() {
+abstract class JichangDatabase : RoomDatabase() {
     abstract fun snapshots(): SnapshotDao
 
     companion object {
-        @Volatile private var instance: TowerDatabase? = null
-        fun get(context: Context): TowerDatabase = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(context.applicationContext, TowerDatabase::class.java, "tower-android.db")
+        @Volatile private var instance: JichangDatabase? = null
+        fun get(context: Context): JichangDatabase = instance ?: synchronized(this) {
+            instance ?: Room.databaseBuilder(context.applicationContext, JichangDatabase::class.java, "jichang-android.db")
                 .build().also { instance = it }
         }
     }

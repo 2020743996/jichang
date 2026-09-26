@@ -1,4 +1,4 @@
-package com.jzb.tower.android.model
+package com.jzb.jichang.android.model
 
 data class SubscriptionSource(
     val id: String,

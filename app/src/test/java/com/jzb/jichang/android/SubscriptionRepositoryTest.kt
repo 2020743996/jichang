@@ -1,12 +1,12 @@
-package com.jzb.tower.android
+package com.jzb.jichang.android
 
 import com.google.gson.Gson
-import com.jzb.tower.android.data.SnapshotDao
-import com.jzb.tower.android.data.SnapshotEntity
-import com.jzb.tower.android.data.TowerRepository
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.model.ProxyNode
-import com.jzb.tower.android.model.SubscriptionSource
+import com.jzb.jichang.android.data.SnapshotDao
+import com.jzb.jichang.android.data.SnapshotEntity
+import com.jzb.jichang.android.data.JichangRepository
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.model.ProxyNode
+import com.jzb.jichang.android.model.SubscriptionSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +20,7 @@ class SubscriptionRepositoryTest {
         val source = SubscriptionSource("source-1", "test", "http://127.0.0.1:1/subscription")
         val oldNode = ProxyNode("node-1", source.id, "old node", "trojan", "old.example", 443)
         val dao = InMemorySnapshotDao(Gson().toJson(AppState(sources = listOf(source), nodes = listOf(oldNode))))
-        val repository = TowerRepository(dao)
+        val repository = JichangRepository(dao)
         delay(100)
 
         try { runCatching { repository.refreshSource(source.id) } }
@@ -31,7 +31,7 @@ class SubscriptionRepositoryTest {
     }
 
     @Test fun sourceUrlsMustBeHttpOrHttps() = runBlocking {
-        val repository = TowerRepository(InMemorySnapshotDao())
+        val repository = JichangRepository(InMemorySnapshotDao())
         val result = try { runCatching { repository.addSource("bad", "file:///etc/passwd") } }
         finally { repository.close() }
         assertEquals(true, result.isFailure)

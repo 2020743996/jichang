@@ -1,8 +1,8 @@
-package com.jzb.tower.android.service
+package com.jzb.jichang.android.service
 
 import com.google.gson.Gson
-import com.jzb.tower.android.model.ParseResult
-import com.jzb.tower.android.model.ProxyNode
+import com.jzb.jichang.android.model.ParseResult
+import com.jzb.jichang.android.model.ProxyNode
 import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor

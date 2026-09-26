@@ -1,4 +1,4 @@
-package com.jzb.tower.android
+package com.jzb.jichang.android
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -6,16 +6,16 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import com.jzb.tower.android.data.TowerDatabase
-import com.jzb.tower.android.data.TowerRepository
-import com.jzb.tower.android.model.AppState
-import com.jzb.tower.android.service.GeneratedConfig
-import com.jzb.tower.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.data.JichangDatabase
+import com.jzb.jichang.android.data.JichangRepository
+import com.jzb.jichang.android.model.AppState
+import com.jzb.jichang.android.service.GeneratedConfig
+import com.jzb.jichang.android.service.MihomoConfigGenerator
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = TowerRepository(TowerDatabase.get(application).snapshots())
+    private val repository = JichangRepository(JichangDatabase.get(application).snapshots())
     private val generator = MihomoConfigGenerator()
     val state: StateFlow<AppState> = repository.state
 
