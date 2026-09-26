@@ -77,7 +77,8 @@ fun Modifier.glassMaterial(shape: Shape, dark: Boolean, opacity: Float = LocalGl
     val edge = if (dark) Color(0x665F8FD8) else Color(0xB3FFFFFF)
     val shadow = if (dark) Color(0x66050A12) else Color(0x18293648)
     val veil = (0.11f + (1f - opacity) * 0.24f).coerceIn(0.18f, 0.35f)
-    return shadow(12.dp, shape, clip = false, ambientColor = shadow, spotColor = shadow)
+    val isSystemBarSurface = shape === androidx.compose.ui.graphics.RectangleShape
+    return shadow(if (isSystemBarSurface) 0.dp else 12.dp, shape, clip = false, ambientColor = shadow, spotColor = shadow)
         .drawBehind {
             val outline = shape.createOutline(size, layoutDirection, this)
             val path = when (outline) {
@@ -89,12 +90,12 @@ fun Modifier.glassMaterial(shape: Shape, dark: Boolean, opacity: Float = LocalGl
                 drawRect(if (dark) Color(0xFF141B27).copy(alpha = veil + 0.12f) else Color(0xFFFFFFFF).copy(alpha = veil + 0.12f))
                 drawRect(Brush.verticalGradient(listOf(Color.White.copy(alpha = if (dark) 0.12f else 0.52f), Color.Transparent), endY = size.height * 0.48f))
                 drawLine(
-                    brush = Brush.horizontalGradient(listOf(Color.Transparent, edge, Color.White.copy(alpha = if (dark) 0.34f else 0.95f), edge, Color.Transparent)),
-                    start = androidx.compose.ui.geometry.Offset(size.width * 0.08f, 1.dp.toPx()),
-                    end = androidx.compose.ui.geometry.Offset(size.width * 0.92f, 1.dp.toPx()),
+                    brush = if (isSystemBarSurface) Brush.horizontalGradient(listOf(edge, edge.copy(alpha = 0.45f), edge)) else Brush.horizontalGradient(listOf(Color.Transparent, edge, Color.White.copy(alpha = if (dark) 0.34f else 0.95f), edge, Color.Transparent)),
+                    start = androidx.compose.ui.geometry.Offset(if (isSystemBarSurface) 0f else size.width * 0.08f, 1.dp.toPx()),
+                    end = androidx.compose.ui.geometry.Offset(if (isSystemBarSurface) size.width else size.width * 0.92f, 1.dp.toPx()),
                     strokeWidth = 1.dp.toPx(),
                 )
-                drawRoundRect(color = Color.Black.copy(alpha = if (dark) 0.20f else 0.045f), style = Stroke(width = 1.dp.toPx()))
+                if (!isSystemBarSurface) drawRoundRect(color = Color.Black.copy(alpha = if (dark) 0.20f else 0.045f), style = Stroke(width = 1.dp.toPx()))
             }
         }
 }

@@ -11,6 +11,7 @@ import android.os.Environment
 import android.provider.Settings
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -71,6 +72,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -149,6 +151,9 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
         setContent { JichangApp() }
     }
 }
@@ -169,7 +174,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f }.getOrDefault(true)
     }
     val localView = LocalView.current
-    val glassCornerRadiusPx = with(LocalDensity.current) { 20.dp.toPx() }
     SideEffect {
         (context as? Activity)?.window?.let { window ->
             WindowCompat.getInsetsController(window, localView).apply {
@@ -300,8 +304,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 .graphicsLayer {
                     liquidGlassScene.shader.setFloatUniform("topRect", glassTopRect.left, glassTopRect.top, glassTopRect.right, glassTopRect.bottom)
                     liquidGlassScene.shader.setFloatUniform("bottomRect", glassBottomRect.left, glassBottomRect.top, glassBottomRect.right, glassBottomRect.bottom)
-                    liquidGlassScene.shader.setFloatUniform("topRadius", glassCornerRadiusPx)
-                    liquidGlassScene.shader.setFloatUniform("bottomRadius", glassCornerRadiusPx)
+                    liquidGlassScene.shader.setFloatUniform("topRadius", 0f)
+                    liquidGlassScene.shader.setFloatUniform("bottomRadius", 0f)
                     liquidGlassScene.shader.setFloatUniform("opacity", glassOpacity)
                     liquidGlassScene.shader.setFloatUniform("isDark", if (isDark) 1f else 0f)
                     renderEffect = liquidGlassScene.renderEffect
@@ -353,7 +357,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             val pos = coordinates.positionInRoot()
                             glassBottomRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
                         }
-                        .glassMaterial(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp), isDark, glassOpacity),
+                        .glassMaterial(RectangleShape, isDark, glassOpacity),
                     containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
                 ) {
@@ -364,7 +368,19 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             AppPage.Config -> Icons.Outlined.Description
                             AppPage.Templates -> Icons.Outlined.FolderOpen
                         }
-                        NavigationBarItem(selected = page == item, onClick = { page = item }, icon = { Icon(icon, null) }, label = { Text(item.label) })
+                        NavigationBarItem(
+                            selected = page == item,
+                            onClick = { page = item },
+                            icon = { Icon(icon, null) },
+                            label = { Text(item.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                indicatorColor = Color.Transparent,
+                            ),
+                        )
                     }
                 }
             },
@@ -533,7 +549,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     )
                     Text("只调整顶栏、底栏和分段控件。正文保持清晰。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        Text("鸡场", Modifier.glassMaterial(RoundedCornerShape(18.dp), isDark, glassOpacity).padding(horizontal = 28.dp, vertical = 12.dp), fontWeight = FontWeight.SemiBold)
+                        Text("玻璃预览", Modifier.glassMaterial(RoundedCornerShape(18.dp), isDark, glassOpacity).padding(horizontal = 28.dp, vertical = 12.dp), fontWeight = FontWeight.SemiBold)
                     }
                 }
             },
@@ -548,7 +564,6 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
     LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("鸡场", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Text("配置一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text("管理 Mihomo 配置与节点资源", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
