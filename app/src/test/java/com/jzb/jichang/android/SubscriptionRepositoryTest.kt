@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SubscriptionRepositoryTest {
@@ -35,6 +36,38 @@ class SubscriptionRepositoryTest {
         val result = try { runCatching { repository.addSource("bad", "file:///etc/passwd") } }
         finally { repository.close() }
         assertEquals(true, result.isFailure)
+    }
+
+    @Test fun templatesCanCreateProfilesAndCannotBeDeletedWhileInUse() = runBlocking {
+        val repository = JichangRepository(InMemorySnapshotDao())
+        delay(100)
+        val raw = """
+            mixed-port: 7891
+            proxies:
+              - {name: Tokyo, type: ss, server: tokyo.example, port: 443, cipher: aes-128-gcm, password: secret}
+            proxy-groups:
+              - {name: PROXY, type: select, proxies: [Tokyo, DIRECT]}
+            rules:
+              - MATCH,PROXY
+        """.trimIndent()
+        try {
+            repository.saveTemplate("Tokyo base", raw, "tokyo.yaml")
+            val templateId = repository.state.value.templates.single().id
+            repository.createProfileFromTemplate("Tokyo copy", "tokyo-copy.yaml", templateId)
+            val profile = repository.state.value.activeProfile
+
+            assertEquals(templateId, profile.templateId)
+            assertEquals(1, repository.state.value.nodes.size)
+            assertEquals(setOf(repository.state.value.nodes.single().id), profile.enabledNodeIds)
+            assertTrue(runCatching { repository.deleteTemplate(templateId) }.isFailure)
+
+            repository.deleteProfile(profile.id)
+            repository.renameTemplate(templateId, "Tokyo template")
+            repository.deleteTemplate(templateId)
+            assertEquals(emptyList<Any>(), repository.state.value.templates)
+        } finally {
+            repository.close()
+        }
     }
 
     private class InMemorySnapshotDao(initial: String? = null) : SnapshotDao {

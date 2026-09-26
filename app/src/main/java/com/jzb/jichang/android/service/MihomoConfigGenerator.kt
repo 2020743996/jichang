@@ -7,7 +7,9 @@ import com.jzb.jichang.android.model.ProxyNode
 import com.jzb.jichang.android.model.RuleCondition
 import com.jzb.jichang.android.model.RuleProvider
 import org.yaml.snakeyaml.DumperOptions
+import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.constructor.SafeConstructor
 import java.util.LinkedHashMap
 
 enum class ConfigSourceMode { EMBED_NODES, REFERENCE_SUBSCRIPTIONS }
@@ -94,9 +96,12 @@ class MihomoConfigGenerator {
                 "type" to (group.type.takeIf { it in setOf("select", "url-test", "fallback", "load-balance") } ?: "select"),
                 "proxies" to candidates.ifEmpty { listOf("DIRECT") },
             ).apply {
+                group.extra.forEach { (key, value) ->
+                    if (key !in setOf("name", "type", "proxies")) put(key, value)
+                }
                 if (group.type in setOf("url-test", "fallback", "load-balance")) {
-                    put("url", "https://www.gstatic.com/generate_204")
-                    put("interval", 300)
+                    putIfAbsent("url", "https://www.gstatic.com/generate_204")
+                    putIfAbsent("interval", 300)
                 }
                 if (providerNames.isNotEmpty()) {
                     if (isGenerated) {
@@ -130,14 +135,18 @@ class MihomoConfigGenerator {
         val fallbackTarget = explicitFallback?.group?.takeIf { it in groupNames || it == "DIRECT" || it == "REJECT" } ?: fallbackDefault
         regularRules += "MATCH,$fallbackTarget"
 
-        val root = linkedMapOf<String, Any?>(
-            "mixed-port" to 7890,
-            "allow-lan" to false,
-            "mode" to "rule",
-            "log-level" to "info",
-            "ipv6" to true,
-            "proxies" to proxies,
-        )
+        val templateRoot = profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id } }
+            ?.let { template -> MihomoTemplateParser().parse(template.rawYaml).rawRoot }
+            .orEmpty()
+        val root = LinkedHashMap<String, Any?>().apply {
+            putAll(templateRoot)
+            putIfAbsent("mixed-port", 7890)
+            putIfAbsent("allow-lan", false)
+            putIfAbsent("mode", "rule")
+            putIfAbsent("log-level", "info")
+            putIfAbsent("ipv6", true)
+        }
+        root["proxies"] = proxies
         if (providerNames.isNotEmpty()) root["proxy-providers"] = providerSources.mapIndexed { index, source ->
             "订阅-${index + 1}" to linkedMapOf<String, Any?>(
                 "type" to "http",
@@ -172,7 +181,11 @@ class MihomoConfigGenerator {
         val value = rule.value.trim()
         if (type in setOf("AND", "OR", "NOT")) {
             val minimum = if (type == "NOT") 1 else 2
-            if (rule.conditions.size < minimum) return null
+            if (rule.conditions.size < minimum) {
+                val original = rule.rawLine?.takeIf { it.isNotBlank() && !it.contains('\n') && !it.contains('\r') } ?: return null
+                val targetSeparator = original.lastIndexOf(',')
+                return if (targetSeparator > 0) original.substring(0, targetSeparator + 1) + target else null
+            }
             val conditions = rule.conditions.mapNotNull(::serializeConditionRule)
             if (conditions.size < minimum) return null
             return "$type,(${conditions.joinToString(",") { "($it)" }}),$target"
@@ -186,6 +199,7 @@ class MihomoConfigGenerator {
         val params = buildList {
             if (rule.noResolve && type in setOf("IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "SRC-IP-CIDR", "SRC-IP-SUFFIX", "IP-ASN", "GEOIP", "SRC-GEOIP", "SRC-IP-ASN")) add("no-resolve")
             if (rule.source && type in setOf("IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "GEOIP")) add("src")
+            addAll(rule.extraParameters.filter { it.isNotBlank() && !it.contains(',') && !it.contains('\n') && !it.contains('\r') })
         }
         return listOf(type, value, target).plus(params).joinToString(",")
     }
@@ -214,6 +228,9 @@ class MihomoConfigGenerator {
         "behavior" to provider.behavior,
         "format" to provider.format,
     ).apply {
+        provider.extra.forEach { (key, value) ->
+            if (key !in setOf("type", "behavior", "format", "url", "path", "interval", "payload", "header")) put(key, value)
+        }
         if (provider.type == "http") {
             put("url", provider.url)
             put("path", provider.path.ifBlank { "./rule-providers/${provider.name.safeKey()}.yaml" })

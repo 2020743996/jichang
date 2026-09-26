@@ -6,6 +6,7 @@ import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import com.jzb.jichang.android.model.AppState
 import com.jzb.jichang.android.model.ConfigProfile
+import com.jzb.jichang.android.model.ConfigTemplate
 import com.jzb.jichang.android.model.PolicyGroup
 import com.jzb.jichang.android.model.ProxyNode
 import com.jzb.jichang.android.model.RuleCondition
@@ -16,13 +17,14 @@ import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.SubscriptionParser
+import com.jzb.jichang.android.service.MihomoTemplateParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,6 +44,7 @@ class JichangRepository(private val dao: SnapshotDao) {
     private val mutableState = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = mutableState
     private val parser = SubscriptionParser()
+    private val templateParser = MihomoTemplateParser()
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -50,15 +53,14 @@ class JichangRepository(private val dao: SnapshotDao) {
 
     init {
         scope.launch {
-            dao.observe().collectLatest { payload ->
-                if (payload.isNullOrBlank()) {
-                    dao.save(SnapshotEntity(payload = gson.toJson(AppState())))
-                } else {
-                    runCatching { decodeState(payload) }.getOrNull()?.let { migrated ->
-                        mutableState.value = migrated
-                        if (!runCatching { JsonParser.parseString(payload).asJsonObject.has("profiles") }.getOrDefault(false)) {
-                            dao.save(SnapshotEntity(payload = gson.toJson(migrated)))
-                        }
+            val payload = dao.observe().first()
+            if (payload.isNullOrBlank()) {
+                dao.save(SnapshotEntity(payload = gson.toJson(AppState())))
+            } else {
+                runCatching { decodeState(payload) }.getOrNull()?.let { migrated ->
+                    mutableState.value = migrated
+                    if (!runCatching { JsonParser.parseString(payload).asJsonObject.has("profiles") }.getOrDefault(false)) {
+                        dao.save(SnapshotEntity(payload = gson.toJson(migrated)))
                     }
                 }
             }
@@ -72,10 +74,13 @@ class JichangRepository(private val dao: SnapshotDao) {
         val sources = json.getAsJsonArray("sources")?.let { gson.fromJson<List<SubscriptionSource>>(it, object : TypeToken<List<SubscriptionSource>>() {}.type) }.orEmpty()
         val nodes = json.getAsJsonArray("nodes")?.let { gson.fromJson<List<ProxyNode>>(it, object : TypeToken<List<ProxyNode>>() {}.type) }.orEmpty()
         val profilesJson = json.getAsJsonArray("profiles")
+        val templates = json.getAsJsonArray("templates")?.let {
+            gson.fromJson<List<ConfigTemplate>>(it, object : TypeToken<List<ConfigTemplate>>() {}.type)
+        }.orEmpty()
         if (profilesJson != null && profilesJson.size() > 0) {
             val profiles = gson.fromJson<List<ConfigProfile>>(profilesJson, object : TypeToken<List<ConfigProfile>>() {}.type)
             val activeId = json.get("activeProfileId")?.asString?.takeIf { id -> profiles.any { it.id == id } } ?: profiles.first().id
-            return AppState(sources, nodes, profiles, activeId)
+            return AppState(sources, nodes, profiles, activeId, templates)
         }
 
         // Version-1 stored one global rule profile and global enabled flags on resources.
@@ -87,7 +92,7 @@ class JichangRepository(private val dao: SnapshotDao) {
             enabledNodeIds = nodes.filter { it.enabled }.map { it.id }.toSet(),
             ruleProfile = rules,
         )
-        return AppState(sources, nodes, listOf(migrated), migrated.id)
+        return AppState(sources, nodes, listOf(migrated), migrated.id, templates)
     }
 
     suspend fun createProfile(name: String, fileName: String, copyActive: Boolean): String = update { state ->
@@ -106,6 +111,46 @@ class JichangRepository(private val dao: SnapshotDao) {
             id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
         )
         state.copy(profiles = state.profiles + profile, activeProfileId = profile.id)
+    }.activeProfileId
+
+    suspend fun saveTemplate(name: String, rawYaml: String, fileName: String): String = update { state ->
+        templateParser.parse(rawYaml)
+        val cleanName = name.trim().ifBlank { fileName.substringBeforeLast('.') }
+        require(cleanName.isNotBlank()) { "请输入模板名称" }
+        require(state.templates.none { it.name.equals(cleanName, true) }) { "模板名称已存在" }
+        val template = ConfigTemplate(UUID.randomUUID().toString(), cleanName, rawYaml, fileName)
+        state.copy(templates = state.templates + template)
+    }.templates.last().id
+
+    suspend fun renameTemplate(templateId: String, name: String) = update { state ->
+        val cleanName = name.trim()
+        require(cleanName.isNotBlank()) { "请输入模板名称" }
+        require(state.templates.any { it.id == templateId }) { "模板不存在" }
+        require(state.templates.none { it.id != templateId && it.name.equals(cleanName, true) }) { "模板名称已存在" }
+        state.copy(templates = state.templates.map { if (it.id == templateId) it.copy(name = cleanName) else it })
+    }
+
+    suspend fun deleteTemplate(templateId: String) = update { state ->
+        require(state.profiles.none { it.templateId == templateId }) { "有配置正在使用此模板，请先删除相关配置" }
+        state.copy(templates = state.templates.filterNot { it.id == templateId })
+    }
+
+    suspend fun createProfileFromTemplate(name: String, fileName: String, templateId: String): String = update { state ->
+        val cleanName = name.trim()
+        require(cleanName.isNotBlank()) { "请输入配置名称" }
+        require(state.profiles.none { it.name.equals(cleanName, true) }) { "配置名称已存在" }
+        val template = state.templates.firstOrNull { it.id == templateId } ?: error("模板不存在")
+        val parsed = templateParser.parse(template.rawYaml)
+        val importedNodes = parsed.nodes
+        val profile = ConfigProfile(
+            id = UUID.randomUUID().toString(),
+            name = cleanName,
+            fileName = fileName.trim().ifBlank { cleanName },
+            enabledNodeIds = importedNodes.map { it.id }.toSet(),
+            ruleProfile = parsed.ruleProfile,
+            templateId = template.id,
+        )
+        state.copy(nodes = state.nodes + importedNodes, profiles = state.profiles + profile, activeProfileId = profile.id)
     }.activeProfileId
 
     suspend fun switchProfile(profileId: String) = update { state ->
@@ -143,7 +188,7 @@ class JichangRepository(private val dao: SnapshotDao) {
     suspend fun refreshSource(sourceId: String): Int = withContext(Dispatchers.IO) {
         val source = mutableState.value.sources.firstOrNull { it.id == sourceId } ?: error("订阅已不存在")
         try {
-            val request = Request.Builder().url(source.url).header("User-Agent", "JichangAndroid/0.3.0").build()
+            val request = Request.Builder().url(source.url).header("User-Agent", "JichangAndroid/0.5.0").build()
             val response = http.newCall(request).execute()
             response.use {
                 if (!it.isSuccessful) error("服务器返回 HTTP ${it.code}")

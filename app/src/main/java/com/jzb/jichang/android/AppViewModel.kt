@@ -36,6 +36,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun createProfile(name: String, fileName: String, copyActive: Boolean) = run { repository.createProfile(name, fileName, copyActive); "配置已创建并切换" }
+    fun createProfileFromTemplate(name: String, fileName: String, templateId: String) = run {
+        repository.createProfileFromTemplate(name, fileName, templateId); "已基于模板创建并切换配置"
+    }
+    fun saveTemplate(name: String, yaml: String, fileName: String) = run {
+        repository.saveTemplate(name, yaml, fileName); "模板已保存到本机"
+    }
+    suspend fun saveTemplateNow(name: String, yaml: String, fileName: String) {
+        repository.saveTemplate(name, yaml, fileName)
+    }
+    fun renameTemplate(id: String, name: String) = run { repository.renameTemplate(id, name); "模板名称已更新" }
+    fun deleteTemplate(id: String) = run { repository.deleteTemplate(id); "模板已删除" }
     fun switchProfile(id: String) = run { repository.switchProfile(id); null }
     fun updateProfile(id: String, name: String, fileName: String) = run { repository.updateProfile(id, name, fileName); "配置已保存" }
     fun deleteProfile(id: String) = run { repository.deleteProfile(id); "配置已删除" }

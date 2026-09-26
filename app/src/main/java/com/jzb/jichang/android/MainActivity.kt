@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Home
@@ -74,6 +75,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -91,6 +97,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -98,6 +105,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.widthIn
@@ -120,7 +128,6 @@ import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.NodeAutoGroups
 import com.jzb.jichang.android.service.RemoteConfigDownloader
-import com.jzb.jichang.android.service.RemoteConfigFile
 import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -133,7 +140,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppPage(val label: String) { Home("概览"), Resources("资源"), Config("配置") }
+private enum class AppPage(val label: String) { Home("概览"), Resources("资源"), Config("配置"), Templates("模板") }
 private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("节点") }
 private enum class ConfigTab(val label: String) { Rules("规则"), Export("分享") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
@@ -170,7 +177,10 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var remoteProgress by remember { mutableStateOf<Float?>(null) }
     var remoteStatus by remember { mutableStateOf<String?>(null) }
     var remoteError by remember { mutableStateOf<String?>(null) }
-    var pendingRemoteFile by remember { mutableStateOf<RemoteConfigFile?>(null) }
+    var templateToPreview by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
+    var templateToCreate by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
+    var templateToRename by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
+    var templateToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
     var pendingSensitiveAction by remember { mutableStateOf<ExportAction?>(null) }
     val scope = rememberCoroutineScope()
     val remoteDownloader = remember { RemoteConfigDownloader() }
@@ -191,6 +201,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val generated = remember(state, profile) { generator.generate(state, profile, exportOptions) }
     val configText = generated.yaml
     val filename = remember(profile.fileName) { safeYamlFileName(profile.fileName) }
+    var templateExportContent by remember { mutableStateOf<String?>(null) }
 
     val saveLegacyConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
         if (uri != null) {
@@ -204,16 +215,16 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         }
     }
 
-    val saveRemoteLegacy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
-        val file = pendingRemoteFile
-        pendingRemoteFile = null
-        if (uri != null && file != null) scope.launch {
+    val saveTemplateLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
+        val content = templateExportContent
+        templateExportContent = null
+        if (uri != null && content != null) scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法打开目标文件" }.use { it.write(file.bytes) }
+                    checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法打开目标文件" }.use { it.write(content.toByteArray(Charsets.UTF_8)) }
                 }
-            }.onSuccess { remoteStatus = "远程配置已下载：${file.fileName}" }
-                .onFailure { remoteError = it.message ?: "保存远程配置失败" }
+            }.onSuccess { viewModel.run { "模板已导出" } }
+                .onFailure { viewModel.run { throw it } }
         }
     }
 
@@ -227,14 +238,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 val file = withContext(Dispatchers.IO) {
                     remoteDownloader.download(url, requestedFileName) { progress -> remoteProgress = progress.fraction }
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    withContext(Dispatchers.IO) { saveRemoteToDownloads(context, file) }
-                    remoteStatus = "远程配置已下载到 Downloads/鸡场/${file.fileName}"
-                    showRemoteConfigDialog = false
-                } else {
-                    pendingRemoteFile = file
-                    saveRemoteLegacy.launch(file.fileName)
-                }
+                val rawYaml = String(file.bytes, Charsets.UTF_8)
+                withContext(Dispatchers.Default) { com.jzb.jichang.android.service.MihomoTemplateParser().parse(rawYaml) }
+                val templateName = file.fileName.removeSuffix(".yaml").ifBlank { "远程模板" }
+                viewModel.saveTemplateNow(templateName, rawYaml, file.fileName)
+                remoteStatus = "模板“$templateName”已保存到本机"
+                showRemoteConfigDialog = false
             } catch (error: Throwable) {
                 remoteError = error.message ?: "远程配置下载失败，请重试"
             } finally {
@@ -265,8 +274,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         Scaffold(
             modifier = Modifier.fillMaxSize().background(Brush.linearGradient(listOf(
                 MaterialTheme.colorScheme.background,
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.48f),
-                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.38f),
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.34f),
+                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.08f),
                 MaterialTheme.colorScheme.background,
             ))),
             contentWindowInsets = WindowInsets(0),
@@ -279,8 +288,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f)),
-                    modifier = Modifier.border(BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))),
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                    modifier = Modifier.glassMaterial(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp), isDark),
                     actions = {
                         Box {
                             TextButton(onClick = { profileMenu = true }) { Text(profile.name, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null) }
@@ -301,8 +310,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             },
             bottomBar = {
                 NavigationBar(
-                    modifier = Modifier.border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))),
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.66f),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(26.dp), isDark),
+                    containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
                 ) {
                     AppPage.entries.forEach { item ->
@@ -310,6 +319,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             AppPage.Home -> Icons.Outlined.Home
                             AppPage.Resources -> Icons.Outlined.Devices
                             AppPage.Config -> Icons.Outlined.Description
+                            AppPage.Templates -> Icons.Outlined.FolderOpen
                         }
                         NavigationBarItem(selected = page == item, onClick = { page = item }, icon = { Icon(icon, null) }, label = { Text(item.label) })
                     }
@@ -322,16 +332,21 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         Text(message, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                when (page) {
-                    AppPage.Home -> HomePage(state, onNavigate = { page = it }, modifier = Modifier.weight(1f))
-                    AppPage.Resources -> Column(Modifier.weight(1f)) {
+                AnimatedContent(
+                    targetState = page,
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.985f)).togetherWith(fadeOut()) },
+                    label = "main-page-transition",
+                ) { currentPage -> when (currentPage) {
+                    AppPage.Home -> HomePage(state, onNavigate = { page = it }, modifier = Modifier.fillMaxSize())
+                    AppPage.Resources -> Column(Modifier.fillMaxSize()) {
                         SegmentedTabs(ResourceTab.entries.map { it.label }, resourceTab.ordinal) { resourceTab = ResourceTab.entries[it] }
                         when (resourceTab) {
                             ResourceTab.Sources -> SourcesPage(state, viewModel, { dialog = DialogKind.Source }, Modifier.weight(1f))
                             ResourceTab.Nodes -> NodesPage(state, viewModel, Modifier.weight(1f)) { dialog = DialogKind.Node }
                         }
                     }
-                    AppPage.Config -> Column(Modifier.weight(1f)) {
+                    AppPage.Config -> Column(Modifier.fillMaxSize()) {
                         SegmentedTabs(ConfigTab.entries.map { it.label }, configTab.ordinal) { configTab = ConfigTab.entries[it] }
                         when (configTab) {
                             ConfigTab.Rules -> RulesPage(
@@ -346,11 +361,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
                                 configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
-                                remoteDownloading = remoteDownloading, remoteProgress = remoteProgress,
-                                remoteStatus = remoteStatus, remoteError = remoteError,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
                                 onOpenFilters = { showExportSetup = true }, onDownload = { requestExport(ExportAction.Download) },
-                                onRemoteDownload = { showRemoteConfigDialog = true; remoteError = null },
                                 onShare = { requestExport(ExportAction.Share) }, onStopShare = { shareController.stop() },
                                 onShareLink = {
                                     val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shareUrl)
@@ -359,7 +371,22 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                     }
-                }
+                    AppPage.Templates -> TemplatesPage(
+                        templates = state.templates,
+                        profiles = state.profiles,
+                        downloading = remoteDownloading,
+                        progress = remoteProgress,
+                        status = remoteStatus,
+                        error = remoteError,
+                        onAdd = { showRemoteConfigDialog = true; remoteError = null },
+                        onPreview = { templateToPreview = it },
+                        onCreate = { templateToCreate = it },
+                        onRename = { templateToRename = it },
+                        onDelete = { templateToDelete = it },
+                        onExport = { template -> templateExportContent = template.rawYaml; saveTemplateLauncher.launch(template.fileName) },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } }
             }
         }
     }
@@ -371,6 +398,25 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         onDismiss = { if (!remoteDownloading) showRemoteConfigDialog = false },
         onDownload = ::startRemoteDownload,
     )
+
+    templateToPreview?.let { template -> TemplatePreviewDialog(template, onDismiss = { templateToPreview = null }) }
+    templateToCreate?.let { template -> TemplateCreateDialog(template, onDismiss = { templateToCreate = null }, onCreate = { name, fileName ->
+        viewModel.createProfileFromTemplate(name, fileName, template.id)
+        templateToCreate = null
+        page = AppPage.Config
+        configTab = ConfigTab.Rules
+    }) }
+    templateToRename?.let { template -> TemplateRenameDialog(template, onDismiss = { templateToRename = null }, onRename = { name ->
+        viewModel.renameTemplate(template.id, name)
+        templateToRename = null
+    }) }
+    templateToDelete?.let { template -> AlertDialog(
+        onDismissRequest = { templateToDelete = null },
+        title = { Text("删除模板？") },
+        text = { Text("模板原文会从本机移除。正在使用此模板的配置需要先删除或改用其他模板。") },
+        confirmButton = { TextButton(onClick = { viewModel.deleteTemplate(template.id); templateToDelete = null }) { Text("删除") } },
+        dismissButton = { TextButton(onClick = { templateToDelete = null }) { Text("取消") } },
+    ) }
 
     when (dialog) {
         DialogKind.Source -> SourceDialog(onDismiss = { dialog = null }, onSave = { name, url -> viewModel.addSource(name, url); dialog = null })
@@ -428,37 +474,46 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
 @Composable
 private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
-    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("你的配置，一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text("订阅、策略与 Mihomo 配置都在本机管理。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("配置工作台", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("订阅、节点和分流策略，一页掌握。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item {
+            Card(onClick = { onNavigate(AppPage.Config) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("当前配置", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.74f))
+                            Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                        Icon(Icons.Outlined.Description, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary)
                     }
-                    Icon(Icons.Outlined.Hub, null, Modifier.size(38.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("${profile.enabledNodeIds.size} 个已启用节点   ·   ${profile.ruleProfile.rules.size} 条规则   ·   ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text("打开配置与分享  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("订阅", state.sources.count { it.id in profile.selectedSourceIds }.toString(), "${state.sources.size} 个来源", Modifier.weight(1f), AppPage.Resources, onNavigate)
-                MetricCard("节点", profile.enabledNodeIds.size.toString(), "共 ${state.nodes.size} 个", Modifier.weight(1f), AppPage.Resources, onNavigate)
-                MetricCard("规则", profile.ruleProfile.rules.size.toString(), "${profile.ruleProfile.groups.size} 个策略组", Modifier.weight(1f), AppPage.Config, onNavigate)
+                MetricCard("订阅来源", "${state.sources.size}", "${profile.selectedSourceIds.size} 个用于此配置", Modifier.weight(1f), AppPage.Resources, onNavigate)
+                MetricCard("节点资源", "${state.nodes.size}", "${profile.enabledNodeIds.size} 个已启用", Modifier.weight(1f), AppPage.Resources, onNavigate)
             }
         }
         item {
-            Text("快捷入口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MetricCard("分流规则", "${profile.ruleProfile.rules.size}", "${profile.ruleProfile.groups.size} 个策略组", Modifier.weight(1f), AppPage.Config, onNavigate)
+                MetricCard("本地模板", "${state.templates.size}", "可作为新配置起点", Modifier.weight(1f), AppPage.Templates, onNavigate)
+            }
         }
         item {
-            DashboardAction("订阅与节点", "管理共享资源，按配置独立选择", Icons.Outlined.CloudDownload) { onNavigate(AppPage.Resources) }
+            Text("常用入口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         }
-        item {
-            DashboardAction("规则与策略", "可视化编辑 Mihomo 分流配置", Icons.Outlined.Tune) { onNavigate(AppPage.Config) }
-        }
-        item {
-            DashboardAction("导出 ${profile.name}", "${safeYamlFileName(profile.fileName)} · 下载或局域网分享", Icons.Outlined.Description) { onNavigate(AppPage.Config) }
-        }
+        item { DashboardAction("订阅与节点", "管理来源和可用节点", Icons.Outlined.Devices) { onNavigate(AppPage.Resources) } }
+        item { DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Config) } }
+        item { DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen) { onNavigate(AppPage.Templates) } }
     }
 }
 
@@ -744,14 +799,9 @@ private fun ExportPage(
     filename: String,
     shareUrl: String?,
     shareError: String?,
-    remoteDownloading: Boolean,
-    remoteProgress: Float?,
-    remoteStatus: String?,
-    remoteError: String?,
     onModeChange: (ConfigSourceMode) -> Unit,
     onOpenFilters: () -> Unit,
     onDownload: () -> Unit,
-    onRemoteDownload: () -> Unit,
     onShare: () -> Unit,
     onStopShare: () -> Unit,
     onShareLink: () -> Unit,
@@ -785,16 +835,6 @@ private fun ExportPage(
             Button(onClick = onDownload, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.CloudDownload, null); Spacer(Modifier.width(6.dp)); Text("下载配置") }
             OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "局域网分享" else "更新分享") }
         }
-        OutlinedButton(onClick = onRemoteDownload, enabled = !remoteDownloading, modifier = Modifier.fillMaxWidth()) {
-            if (remoteDownloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.CloudDownload, null)
-            Spacer(Modifier.width(8.dp)); Text(if (remoteDownloading) "正在下载远程配置…" else "从链接下载远程配置")
-        }
-        if (remoteDownloading) {
-            if (remoteProgress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-            else LinearProgressIndicator(progress = { remoteProgress }, modifier = Modifier.fillMaxWidth())
-        }
-        remoteStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
-        remoteError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         } else Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
@@ -822,6 +862,135 @@ private fun ExportPage(
 }
 
 @Composable
+private fun TemplatesPage(
+    templates: List<com.jzb.jichang.android.model.ConfigTemplate>,
+    profiles: List<ConfigProfile>,
+    downloading: Boolean,
+    progress: Float?,
+    status: String?,
+    error: String?,
+    onAdd: () -> Unit,
+    onPreview: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
+    onCreate: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
+    onRename: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
+    onDelete: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
+    onExport: (com.jzb.jichang.android.model.ConfigTemplate) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("配置模板", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("从远程 Mihomo YAML 创建本地模板，再用它快速建立可编辑配置。模板仅保存在此设备。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = onAdd, enabled = !downloading, modifier = Modifier.fillMaxWidth()) {
+                    if (downloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    else Icon(Icons.Outlined.Add, null)
+                    Spacer(Modifier.width(8.dp)); Text(if (downloading) "正在下载模板…" else "从链接添加模板")
+                }
+                if (downloading) {
+                    if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                }
+                status?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
+        if (templates.isEmpty()) item {
+            EmptyCard("模板库还是空的", "添加一份 Mihomo YAML 模板，以它为基础创建自己的配置。", onAdd)
+        }
+        items(templates, key = { it.id }) { template ->
+            val users = profiles.count { it.templateId == template.id }
+            Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(template.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text("${template.fileName} · ${if (users == 0) "尚未使用" else "$users 个配置在使用"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onCreate(template) }, modifier = Modifier.weight(1f)) { Text("用作模板新建配置") }
+                        OutlinedButton(onClick = { onExport(template) }) { Text("导出") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { onRename(template) }) { Text("重命名") }
+                        TextButton(onClick = { onPreview(template) }) { Text("预览") }
+                        TextButton(onClick = { onDelete(template) }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun TemplatePreviewDialog(template: com.jzb.jichang.android.model.ConfigTemplate, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ApplyDialogGlassBlur()
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = Color.Transparent,
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp)
+                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
+            tonalElevation = 0.dp,
+        ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(template.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("${template.fileName} · 仅存储在本机", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = onDismiss) { Text("关闭") }
+                }
+                SelectionContainer {
+                    Text(template.rawYaml, Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp)).padding(14.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateCreateDialog(
+    template: com.jzb.jichang.android.model.ConfigTemplate,
+    onDismiss: () -> Unit,
+    onCreate: (String, String) -> Unit,
+) {
+    var name by remember(template.id) { mutableStateOf("${template.name} 副本") }
+    var fileName by remember(template.id) { mutableStateOf("${template.name} 副本") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("基于模板新建配置") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("节点、策略组和规则会载入可视化编辑器；模板中的其他 Mihomo 字段会保留。")
+            OutlinedTextField(name, { name = it; if (fileName == "${template.name} 副本") fileName = it }, label = { Text("配置名称") }, singleLine = true)
+            OutlinedTextField(fileName, { fileName = it }, label = { Text("导出文件名") }, singleLine = true)
+        } },
+        confirmButton = { TextButton(onClick = { onCreate(name.trim(), fileName.trim()) }, enabled = name.isNotBlank() && fileName.isNotBlank()) { Text("创建") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun TemplateRenameDialog(
+    template: com.jzb.jichang.android.model.ConfigTemplate,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+) {
+    var name by remember(template.id) { mutableStateOf(template.name) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名模板") },
+        text = { OutlinedTextField(name, { name = it }, label = { Text("模板名称") }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { onRename(name.trim()) }, enabled = name.isNotBlank()) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
 private fun RemoteConfigDialog(
     downloading: Boolean,
     progress: Float?,
@@ -832,18 +1001,19 @@ private fun RemoteConfigDialog(
     var url by remember { mutableStateOf("") }
     var fileName by remember { mutableStateOf("") }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ApplyDialogGlassBlur()
         Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight(),
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight()
+                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
             shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-            tonalElevation = 8.dp,
+            color = Color.Transparent,
+            tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("下载远程配置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                Text("输入 Mihomo YAML 的 HTTP(S) 链接。文件会原样保存到 Downloads，不会导入或覆盖当前配置。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("从链接添加模板", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                Text("下载并在本机保存 Mihomo YAML 模板。模板可用于新建鸡场配置；链接不会保存。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(url, { url = it.trim() }, modifier = Modifier.fillMaxWidth(), label = { Text("配置链接") }, placeholder = { Text("https://example.com/config.yaml") }, singleLine = true, enabled = !downloading)
-                OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("文件名（可选）") }, placeholder = { Text("默认使用响应文件名或 URL 文件名") }, singleLine = true, enabled = !downloading)
+                OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("模板名称（可选）") }, placeholder = { Text("默认使用远程文件名") }, singleLine = true, enabled = !downloading)
                 if (downloading) {
                     if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
                     else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
@@ -854,7 +1024,7 @@ private fun RemoteConfigDialog(
                     Spacer(Modifier.width(8.dp))
                     Button(onClick = { onDownload(url, fileName) }, enabled = url.isNotBlank() && !downloading) {
                         if (downloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.CloudDownload, null)
-                        Spacer(Modifier.width(8.dp)); Text("下载")
+                        Spacer(Modifier.width(8.dp)); Text(if (downloading) "添加中…" else "下载为模板")
                     }
                 }
             }
@@ -915,10 +1085,11 @@ private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit
 
 @Composable
 private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.60f), RoundedCornerShape(18.dp)).border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f), RoundedCornerShape(18.dp)).padding(4.dp)) {
+    val dark = isSystemInDarkTheme()
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(20.dp), dark).padding(4.dp)) {
         labels.forEachIndexed { index, label ->
             TextButton(onClick = { onSelect(index) }, modifier = Modifier.weight(1f), colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
-                containerColor = if (selected == index) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.84f) else Color.Transparent,
+                containerColor = if (selected == index) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f) else Color.Transparent,
             )) { Text(label, fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal) }
         }
     }
@@ -1088,12 +1259,13 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
         categoryMatches && (query.isBlank() || type.contains(query, true))
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ApplyDialogGlassBlur()
         Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp),
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp)
+                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
             shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
-            tonalElevation = 8.dp,
+            color = Color.Transparent,
+            tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(20.dp)) {
                 Text("选择规则类型", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
@@ -1113,6 +1285,20 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TextButton(onClick = onDismiss) { Text("关闭") } }
             }
+        }
+    }
+}
+
+/** Uses Android's real backdrop diffusion for floating glass where the OS supports it. */
+@Composable
+private fun ApplyDialogGlassBlur() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val view = LocalView.current
+        val density = LocalDensity.current
+        SideEffect {
+            val window = (view.parent as? DialogWindowProvider)?.window ?: return@SideEffect
+            window.setBackgroundBlurRadius(with(density) { 30.dp.roundToPx() })
+            window.setDimAmount(0.12f)
         }
     }
 }
@@ -1335,25 +1521,6 @@ private fun safeYamlFileName(value: String): String {
     val clean = value.trim().replace("[\\\\/:*?\"<>|\\p{Cntrl}]".toRegex(), "_").trim('.', ' ')
         .removeSuffix(".yaml").removeSuffix(".yml").ifBlank { "鸡场" }
     return "$clean.yaml"
-}
-
-private fun saveRemoteToDownloads(context: Context, file: RemoteConfigFile) {
-    require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { "当前 Android 版本需要使用系统文件选择器保存" }
-    val resolver = context.contentResolver
-    val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-    val uri = resolver.insert(collection, ContentValues().apply {
-        put(MediaStore.Downloads.DISPLAY_NAME, file.fileName)
-        put(MediaStore.Downloads.MIME_TYPE, "application/yaml")
-        put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/鸡场")
-        put(MediaStore.Downloads.IS_PENDING, 1)
-    }) ?: error("无法创建下载文件")
-    try {
-        checkNotNull(resolver.openOutputStream(uri, "wt")) { "无法写入下载文件" }.use { it.write(file.bytes) }
-        resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
-    } catch (error: Throwable) {
-        resolver.delete(uri, null, null)
-        throw error
-    }
 }
 
 private fun saveToDownloads(context: Context, content: String, filename: String) {

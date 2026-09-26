@@ -27,6 +27,8 @@ data class PolicyGroup(
     val name: String,
     val type: String = "select",
     val members: List<String> = emptyList(),
+    /** Keeps Mihomo group options that the visual editor does not expose. */
+    val extra: Map<String, Any?> = emptyMap(),
 )
 
 /** A serializable rule condition. Groups use operator=AND/OR/NOT; leaves use type/value. */
@@ -47,6 +49,9 @@ data class RoutingRule(
     val noResolve: Boolean = false,
     val source: Boolean = false,
     val conditions: List<RuleCondition> = emptyList(),
+    val extraParameters: List<String> = emptyList(),
+    /** Original Mihomo line for imported expressions not yet editable in the visual rule form. */
+    val rawLine: String? = null,
 )
 
 data class RuleProvider(
@@ -60,6 +65,7 @@ data class RuleProvider(
     val format: String = "yaml",
     val payload: List<String> = emptyList(),
     val headers: Map<String, List<String>> = emptyMap(),
+    val extra: Map<String, Any?> = emptyMap(),
 )
 
 data class SubRuleProfile(
@@ -84,6 +90,15 @@ data class ConfigProfile(
     val sourceMode: String = "EMBED_NODES",
     val enabledRegions: Set<String> = setOf("hk", "tw", "jp", "sg", "us", "kr", "other"),
     val regionOverrides: Map<String, String> = emptyMap(),
+    val templateId: String? = null,
+)
+
+data class ConfigTemplate(
+    val id: String,
+    val name: String,
+    val rawYaml: String,
+    val fileName: String,
+    val createdAt: Long = System.currentTimeMillis(),
 )
 
 data class AppState(
@@ -91,6 +106,7 @@ data class AppState(
     val nodes: List<ProxyNode> = emptyList(),
     val profiles: List<ConfigProfile> = listOf(ConfigProfile("default", "默认配置")),
     val activeProfileId: String = "default",
+    val templates: List<ConfigTemplate> = emptyList(),
 ) {
     val activeProfile: ConfigProfile
         get() = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull() ?: ConfigProfile("default", "默认配置")
