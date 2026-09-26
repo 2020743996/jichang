@@ -70,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -133,7 +134,7 @@ private fun TowerApp(viewModel: AppViewModel = viewModel()) {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("塔台", fontWeight = FontWeight.SemiBold)
+                            Text(stringResource(R.string.app_name), fontWeight = FontWeight.SemiBold)
                             Text("Mihomo 配置管理", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },

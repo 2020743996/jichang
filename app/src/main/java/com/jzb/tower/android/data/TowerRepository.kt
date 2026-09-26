@@ -66,7 +66,7 @@ class TowerRepository(private val dao: SnapshotDao) {
     suspend fun refreshSource(sourceId: String): Int = withContext(Dispatchers.IO) {
         val source = mutableState.value.sources.firstOrNull { it.id == sourceId } ?: error("订阅已不存在")
         try {
-            val request = Request.Builder().url(source.url).header("User-Agent", "TowerAndroid/0.1.0").build()
+            val request = Request.Builder().url(source.url).header("User-Agent", "JichangAndroid/0.1.0").build()
             val response = http.newCall(request).execute()
             response.use {
                 if (!it.isSuccessful) error("服务器返回 HTTP ${it.code}")
