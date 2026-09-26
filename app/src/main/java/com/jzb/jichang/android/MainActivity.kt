@@ -54,6 +54,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -78,11 +81,13 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -91,6 +96,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jzb.jichang.android.model.AppState
@@ -106,8 +119,11 @@ import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.NodeAutoGroups
+import com.jzb.jichang.android.service.RemoteConfigDownloader
+import com.jzb.jichang.android.service.RemoteConfigFile
 import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -149,7 +165,15 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var profileActionMenu by remember { mutableStateOf(false) }
     var showProfileDeleteConfirmation by remember { mutableStateOf<String?>(null) }
     var showExportSetup by remember { mutableStateOf(false) }
+    var showRemoteConfigDialog by remember { mutableStateOf(false) }
+    var remoteDownloading by remember { mutableStateOf(false) }
+    var remoteProgress by remember { mutableStateOf<Float?>(null) }
+    var remoteStatus by remember { mutableStateOf<String?>(null) }
+    var remoteError by remember { mutableStateOf<String?>(null) }
+    var pendingRemoteFile by remember { mutableStateOf<RemoteConfigFile?>(null) }
     var pendingSensitiveAction by remember { mutableStateOf<ExportAction?>(null) }
+    val scope = rememberCoroutineScope()
+    val remoteDownloader = remember { RemoteConfigDownloader() }
     val shareController = remember { LocalShareController(context) }
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
@@ -180,6 +204,46 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         }
     }
 
+    val saveRemoteLegacy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
+        val file = pendingRemoteFile
+        pendingRemoteFile = null
+        if (uri != null && file != null) scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法打开目标文件" }.use { it.write(file.bytes) }
+                }
+            }.onSuccess { remoteStatus = "远程配置已下载：${file.fileName}" }
+                .onFailure { remoteError = it.message ?: "保存远程配置失败" }
+        }
+    }
+
+    fun startRemoteDownload(url: String, requestedFileName: String) {
+        remoteDownloading = true
+        remoteError = null
+        remoteStatus = null
+        remoteProgress = null
+        scope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    remoteDownloader.download(url, requestedFileName) { progress -> remoteProgress = progress.fraction }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    withContext(Dispatchers.IO) { saveRemoteToDownloads(context, file) }
+                    remoteStatus = "远程配置已下载到 Downloads/鸡场/${file.fileName}"
+                    showRemoteConfigDialog = false
+                } else {
+                    pendingRemoteFile = file
+                    saveRemoteLegacy.launch(file.fileName)
+                }
+            } catch (error: Throwable) {
+                remoteError = error.message ?: "远程配置下载失败，请重试"
+            } finally {
+                remoteDownloading = false
+                remoteProgress = null
+            }
+        }
+    }
+
     DisposableEffect(shareController) { onDispose { shareController.unbind() } }
     LaunchedEffect(configText, filename) { shareController.updateConfig(configText, filename) }
 
@@ -199,8 +263,14 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
 
     JichangTheme(darkTheme = isDark) {
         Scaffold(
+            modifier = Modifier.fillMaxSize().background(Brush.linearGradient(listOf(
+                MaterialTheme.colorScheme.background,
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.48f),
+                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.38f),
+                MaterialTheme.colorScheme.background,
+            ))),
             contentWindowInsets = WindowInsets(0),
-                    containerColor = MaterialTheme.colorScheme.background,
+            containerColor = Color.Transparent,
             topBar = {
                 TopAppBar(
                     title = {
@@ -209,6 +279,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f)),
+                    modifier = Modifier.border(BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))),
                     actions = {
                         Box {
                             TextButton(onClick = { profileMenu = true }) { Text(profile.name, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null) }
@@ -224,12 +296,15 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         }
                         if (page == AppPage.Resources && resourceTab == ResourceTab.Sources) IconButton(onClick = { dialog = DialogKind.Source }) { Icon(Icons.Outlined.Add, "添加订阅") }
                         if (page == AppPage.Resources && resourceTab == ResourceTab.Nodes) IconButton(onClick = { dialog = DialogKind.Node }) { Icon(Icons.Outlined.Add, "添加节点") }
-                        if (page == AppPage.Config && configTab == ConfigTab.Rules) IconButton(onClick = { editingGroup = null; dialog = DialogKind.Group }) { Icon(Icons.Outlined.Add, "添加策略组") }
                     },
                 )
             },
             bottomBar = {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)) {
+                NavigationBar(
+                    modifier = Modifier.border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))),
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.66f),
+                    tonalElevation = 0.dp,
+                ) {
                     AppPage.entries.forEach { item ->
                         val icon = when (item) {
                             AppPage.Home -> Icons.Outlined.Home
@@ -239,9 +314,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         NavigationBarItem(selected = page == item, onClick = { page = item }, icon = { Icon(icon, null) }, label = { Text(item.label) })
                     }
                 }
-            },
-            floatingActionButton = {
-                if (page == AppPage.Config && configTab == ConfigTab.Rules) FloatingActionButton(onClick = { editingRule = null; dialog = DialogKind.Rule }) { Icon(Icons.Outlined.Add, "添加规则") }
             },
         ) { insets ->
             Column(Modifier.fillMaxSize().padding(insets)) {
@@ -266,14 +338,19 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 state, viewModel, Modifier.weight(1f),
                                 onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
                                 onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
+                                onAddRule = { editingRule = null; dialog = DialogKind.Rule },
+                                onAddGroup = { editingGroup = null; dialog = DialogKind.Group },
                                 onProviders = { dialog = DialogKind.Providers },
                             )
                             ConfigTab.Export -> ExportPage(
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
                                 configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
+                                remoteDownloading = remoteDownloading, remoteProgress = remoteProgress,
+                                remoteStatus = remoteStatus, remoteError = remoteError,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
                                 onOpenFilters = { showExportSetup = true }, onDownload = { requestExport(ExportAction.Download) },
+                                onRemoteDownload = { showRemoteConfigDialog = true; remoteError = null },
                                 onShare = { requestExport(ExportAction.Share) }, onStopShare = { shareController.stop() },
                                 onShareLink = {
                                     val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shareUrl)
@@ -286,6 +363,14 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             }
         }
     }
+
+    if (showRemoteConfigDialog) RemoteConfigDialog(
+        downloading = remoteDownloading,
+        progress = remoteProgress,
+        error = remoteError,
+        onDismiss = { if (!remoteDownloading) showRemoteConfigDialog = false },
+        onDownload = ::startRemoteDownload,
+    )
 
     when (dialog) {
         DialogKind.Source -> SourceDialog(onDismiss = { dialog = null }, onSave = { name, url -> viewModel.addSource(name, url); dialog = null })
@@ -539,63 +624,113 @@ private fun RulesPage(
     modifier: Modifier = Modifier,
     onEditGroup: (PolicyGroup) -> Unit,
     onEditRule: (Int, com.jzb.jichang.android.model.RoutingRule) -> Unit,
+    onAddRule: () -> Unit,
+    onAddGroup: () -> Unit,
     onProviders: () -> Unit,
 ) {
-    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { HeaderCard("策略组", "选择规则要使用的策略。策略组支持手选、自动测速、故障转移和负载均衡。") }
-        item {
-            Card(onClick = onProviders, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("规则集", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                        Text("${state.ruleProfile.providers.size} 个提供者 · 支持远程、文件与内嵌", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var section by remember { mutableStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("全部类型") }
+    val categories = listOf("全部类型", "域名", "IP 与地理", "端口与网络", "进程", "规则集", "逻辑与兜底")
+    val lastMovableIndex = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type == "MATCH" }) 1 else 0
+    Column(modifier) {
+        SegmentedTabs(listOf("规则 ${state.ruleProfile.rules.size}", "策略组 ${state.ruleProfile.groups.size}", "规则集 ${state.ruleProfile.providers.size}"), section) { section = it }
+        when (section) {
+            0 -> {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(query, { query = it }, modifier = Modifier.weight(1f), label = { Text("搜索规则内容或策略") }, singleLine = true)
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(onClick = onAddRule) { Icon(Icons.Outlined.Add, null); Text("添加") }
+                }
+                ChoiceMenu("$category", categories, { category = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
+                val filtered = state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
+                    val matchesText = query.isBlank() || listOf(rule.type, rule.value, rule.group).any { it.contains(query, true) }
+                    val matchesCategory = when (category) {
+                        "域名" -> rule.type.startsWith("DOMAIN") || rule.type == "GEOSITE"
+                        "IP 与地理" -> rule.type.contains("IP") || rule.type.contains("GEO")
+                        "端口与网络" -> rule.type.contains("PORT") || rule.type in setOf("NETWORK", "IN-TYPE", "DSCP")
+                        "进程" -> rule.type.startsWith("PROCESS") || rule.type == "UID"
+                        "规则集" -> rule.type in setOf("RULE-SET", "SUB-RULE")
+                        "逻辑与兜底" -> rule.type in setOf("AND", "OR", "NOT", "MATCH")
+                        else -> true
                     }
-                    Icon(Icons.Outlined.Edit, null)
+                    matchesText && matchesCategory
+                }
+                if (state.ruleProfile.rules.isEmpty()) {
+                    EmptyCard("从第一条规则开始", "选择匹配类型、内容和策略；MATCH 兜底会自动放在最后。", onAddRule)
+                } else if (filtered.isEmpty()) {
+                    Text("没有符合筛选条件的规则。", Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(filtered, key = { it.first }) { (index, rule) -> RuleListCard(
+                        rule = rule,
+                        onEdit = { onEditRule(index, rule) },
+                        onMoveUp = { viewModel.moveRule(index, -1) },
+                        onMoveDown = { viewModel.moveRule(index, 1) },
+                        onDelete = { viewModel.removeRule(index) },
+                        canMoveUp = index > 0 && rule.type != "MATCH",
+                        canMoveDown = index < lastMovableIndex && rule.type != "MATCH",
+                    ) }
                 }
             }
-        }
-        items(state.ruleProfile.groups, key = { it.name }) { group ->
-            Card(Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Hub, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(group.name, style = MaterialTheme.typography.titleSmall)
-                        Text("${group.type} · ${group.members.size} 个自定义成员", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            1 -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                HeaderCard("策略组", "规则的执行目标。每个组可以手选节点，也可以自动测速或故障转移。")
+                OutlinedButton(onClick = onAddGroup, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("新建策略组") }
+                if (state.ruleProfile.groups.isEmpty()) EmptyCard("还没有策略组", "创建策略组后，规则就可以选择对应的出口。", onAddGroup)
+                else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(state.ruleProfile.groups, key = { it.name }) { group ->
+                        Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Hub, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) { Text(group.name, style = MaterialTheme.typography.titleSmall); Text("${group.type} · ${group.members.size} 个成员", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            TextButton(onClick = { onEditGroup(group) }) { Text("编辑") }
+                            IconButton(onClick = { viewModel.removeGroup(group.name) }) { Icon(Icons.Outlined.Delete, "删除策略组") }
+                        } }
                     }
-                    IconButton(onClick = { onEditGroup(group) }) { Icon(Icons.Outlined.Edit, "编辑策略组") }
-                    IconButton(onClick = { viewModel.removeGroup(group.name) }) { Icon(Icons.Outlined.Delete, "删除策略组") }
                 }
             }
-        }
-        item {
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("路由规则", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text("按从上到下的顺序匹配，兜底规则始终最后执行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        if (state.ruleProfile.rules.isEmpty()) item { Text("还没有自定义规则；Mihomo 配置会自动追加 MATCH 兜底。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(state.ruleProfile.rules.size) { index ->
-            val rule = state.ruleProfile.rules[index]
-            Card(Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(if (rule.type == "MATCH") "兜底规则" else "${rule.type}  ·  ${rule.value}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                        Text("→ ${rule.group}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            else -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                HeaderCard("规则集与子规则", "规则集可以远程下载、读取本地文件或内嵌；子规则保存在当前配置中。")
+                Card(onClick = onProviders, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) { Text("规则集提供者", style = MaterialTheme.typography.titleMedium); Text("${state.ruleProfile.providers.size} 个 · 远程 / 文件 / 内嵌", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        Icon(Icons.Outlined.Edit, "管理规则集")
                     }
-                    IconButton(onClick = { viewModel.moveRule(index, -1) }, enabled = index > 0) { Icon(Icons.Outlined.KeyboardArrowUp, "上移规则") }
-                    IconButton(onClick = { viewModel.moveRule(index, 1) }, enabled = index < state.ruleProfile.rules.lastIndex) { Icon(Icons.Outlined.KeyboardArrowDown, "下移规则") }
-                    IconButton(onClick = { onEditRule(index, rule) }) { Icon(Icons.Outlined.Edit, "编辑规则") }
-                    IconButton(onClick = { viewModel.removeRule(index) }) { Icon(Icons.Outlined.Delete, "删除规则") }
                 }
+                state.ruleProfile.subRules.forEach { sub -> Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(sub.name, fontWeight = FontWeight.Medium); Text("${sub.rules.size} 条子规则", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; TextButton(onClick = onProviders) { Text("管理") } } } }
             }
         }
-        item { Spacer(Modifier.height(72.dp)) }
     }
+}
+
+@Composable
+private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean) {
+    var expanded by remember { mutableStateOf(false) }
+    Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (rule.type == "MATCH") "最终兜底 · MATCH" else rule.type, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                Text(ruleSummary(rule), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                Text("策略  ${rule.group}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Box {
+                IconButton(onClick = { expanded = true }) { Icon(Icons.Outlined.MoreVert, "规则操作") }
+                DropdownMenu(expanded, { expanded = false }) {
+                    DropdownMenuItem(text = { Text("编辑") }, onClick = { expanded = false; onEdit() })
+                    DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { expanded = false; onMoveUp() })
+                    DropdownMenuItem(text = { Text("下移") }, enabled = canMoveDown, onClick = { expanded = false; onMoveDown() })
+                    DropdownMenuItem(text = { Text("删除") }, onClick = { expanded = false; onDelete() })
+                }
+            }
+        }
+    }
+}
+
+private fun ruleSummary(rule: RoutingRule): String = when (rule.type) {
+    "AND", "OR", "NOT" -> "${rule.conditions.size} 个条件"
+    "RULE-SET" -> "规则集 · ${rule.value}"
+    "SUB-RULE" -> "子规则 · ${rule.value}"
+    "MATCH" -> "其余所有流量"
+    else -> rule.value
 }
 
 @Composable
@@ -609,9 +744,14 @@ private fun ExportPage(
     filename: String,
     shareUrl: String?,
     shareError: String?,
+    remoteDownloading: Boolean,
+    remoteProgress: Float?,
+    remoteStatus: String?,
+    remoteError: String?,
     onModeChange: (ConfigSourceMode) -> Unit,
     onOpenFilters: () -> Unit,
     onDownload: () -> Unit,
+    onRemoteDownload: () -> Unit,
     onShare: () -> Unit,
     onStopShare: () -> Unit,
     onShareLink: () -> Unit,
@@ -645,6 +785,16 @@ private fun ExportPage(
             Button(onClick = onDownload, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.CloudDownload, null); Spacer(Modifier.width(6.dp)); Text("下载配置") }
             OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "局域网分享" else "更新分享") }
         }
+        OutlinedButton(onClick = onRemoteDownload, enabled = !remoteDownloading, modifier = Modifier.fillMaxWidth()) {
+            if (remoteDownloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.CloudDownload, null)
+            Spacer(Modifier.width(8.dp)); Text(if (remoteDownloading) "正在下载远程配置…" else "从链接下载远程配置")
+        }
+        if (remoteDownloading) {
+            if (remoteProgress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+            else LinearProgressIndicator(progress = { remoteProgress }, modifier = Modifier.fillMaxWidth())
+        }
+        remoteStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+        remoteError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         } else Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
@@ -668,6 +818,47 @@ private fun ExportPage(
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun RemoteConfigDialog(
+    downloading: Boolean,
+    progress: Float?,
+    error: String?,
+    onDismiss: () -> Unit,
+    onDownload: (String, String) -> Unit,
+) {
+    var url by remember { mutableStateOf("") }
+    var fileName by remember { mutableStateOf("") }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight(),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+            tonalElevation = 8.dp,
+        ) {
+            Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("下载远程配置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                Text("输入 Mihomo YAML 的 HTTP(S) 链接。文件会原样保存到 Downloads，不会导入或覆盖当前配置。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(url, { url = it.trim() }, modifier = Modifier.fillMaxWidth(), label = { Text("配置链接") }, placeholder = { Text("https://example.com/config.yaml") }, singleLine = true, enabled = !downloading)
+                OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("文件名（可选）") }, placeholder = { Text("默认使用响应文件名或 URL 文件名") }, singleLine = true, enabled = !downloading)
+                if (downloading) {
+                    if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onDismiss, enabled = !downloading) { Text("取消") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { onDownload(url, fileName) }, enabled = url.isNotBlank() && !downloading) {
+                        if (downloading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.CloudDownload, null)
+                        Spacer(Modifier.width(8.dp)); Text("下载")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -724,10 +915,10 @@ private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit
 
 @Composable
 private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f), RoundedCornerShape(18.dp)).padding(4.dp)) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.60f), RoundedCornerShape(18.dp)).border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f), RoundedCornerShape(18.dp)).padding(4.dp)) {
         labels.forEachIndexed { index, label ->
             TextButton(onClick = { onSelect(index) }, modifier = Modifier.weight(1f), colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
-                containerColor = if (selected == index) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.92f) else Color.Transparent,
+                containerColor = if (selected == index) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.84f) else Color.Transparent,
             )) { Text(label, fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal) }
         }
     }
@@ -810,25 +1001,25 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
     var noResolve by remember(initial) { mutableStateOf(existing?.noResolve ?: false) }
     var source by remember(initial) { mutableStateOf(existing?.source ?: false) }
     var conditions by remember(initial) { mutableStateOf(existing?.conditions ?: emptyList()) }
-    var menu by remember { mutableStateOf(false) }
+    var showTypePicker by remember { mutableStateOf(false) }
     var strategyMenu by remember { mutableStateOf(false) }
+    var geositeSearch by remember { mutableStateOf("") }
     val composite = type in setOf("AND", "OR", "NOT")
     val valueRequired = type !in setOf("MATCH", "AND", "OR", "NOT")
     val valid = (!valueRequired || value.isNotBlank()) && (!composite || conditions.size >= if (type == "NOT") 1 else 2)
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (initial == null) "新建路由规则" else "编辑路由规则") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.fillMaxWidth(0.96f).widthIn(max = 620.dp),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        title = { Text(if (initial == null) "新建路由规则" else "编辑路由规则") },
+        text = { Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text("规则类型", style = MaterialTheme.typography.labelLarge)
-            Box {
-                OutlinedButton(onClick = { menu = true }, modifier = Modifier.fillMaxWidth()) { Text(if (type == "MATCH") "MATCH · 最终兜底" else type) }
-                DropdownMenu(menu, { menu = false }) {
-                    visualRuleTypes.forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = {
-                        type = option
-                        if (option == "MATCH") value = ""
-                        if (option == "RULE-SET" && value.isBlank()) value = state.ruleProfile.providers.firstOrNull()?.name.orEmpty()
-                        if (option == "SUB-RULE" && value.isBlank()) value = state.ruleProfile.subRules.firstOrNull()?.name.orEmpty()
-                        menu = false
-                    }) }
-                }
+            OutlinedButton(onClick = { showTypePicker = true }, modifier = Modifier.fillMaxWidth()) { Text(if (type == "MATCH") "MATCH · 最终兜底" else type) }
+            Text("常用模板", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "google.com"; group = state.ruleProfile.groups.firstOrNull()?.name ?: "PROXY" }, label = { Text("Google 走代理") })
+                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "apple.com"; group = "DIRECT" }, label = { Text("Apple 直连") })
+                AssistChip(onClick = { type = "GEOSITE"; value = "category-ads-all"; group = "REJECT" }, label = { Text("屏蔽广告") })
             }
             when {
                 type == "MATCH" -> Text("MATCH 会被固定在规则列表末尾。", style = MaterialTheme.typography.bodySmall)
@@ -849,9 +1040,10 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
                 }
                 type == "GEOSITE" -> {
                     val common = listOf("category-ads-all", "cn", "private", "google", "youtube", "apple", "microsoft", "telegram", "github", "geolocation-!cn")
-                    OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text("GEOSITE 分类") }, placeholder = { Text("category-ads-all 或自定义值") }, singleLine = true)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { common.take(4).forEach { tag -> AssistChip(onClick = { value = tag }, label = { Text(tag) }) } }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { common.drop(4).forEach { tag -> AssistChip(onClick = { value = tag }, label = { Text(tag) }) } }
+                    OutlinedTextField(geositeSearch, { geositeSearch = it }, modifier = Modifier.fillMaxWidth(), label = { Text("搜索 GEOSITE 分类") }, singleLine = true)
+                    OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text("匹配值") }, placeholder = { Text("可直接填写自定义分类") }, singleLine = true)
+                    val suggestions = common.filter { geositeSearch.isBlank() || it.contains(geositeSearch, true) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { suggestions.forEach { tag -> AssistChip(onClick = { value = tag }, label = { Text(tag) }) } }
                 }
                 else -> OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text(if (type.startsWith("PROCESS") || type == "UID") "进程 / 用户匹配" else "匹配内容") }, placeholder = { Text(rulePlaceholder(type)) }, singleLine = true)
             }
@@ -867,7 +1059,75 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
             }
         } },
         confirmButton = { TextButton(enabled = valid, onClick = { onSave(initial?.first, RoutingRule(type, value, group, noResolve, source, conditions)) }) { Text(if (initial == null) "添加规则" else "保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+    if (showTypePicker) RuleTypePickerDialog(type, onDismiss = { showTypePicker = false }, onSelect = { selected ->
+        type = selected
+        if (selected == "MATCH") value = ""
+        if (selected == "RULE-SET" && value.isBlank()) value = state.ruleProfile.providers.firstOrNull()?.name.orEmpty()
+        if (selected == "SUB-RULE" && value.isBlank()) value = state.ruleProfile.subRules.firstOrNull()?.name.orEmpty()
+        showTypePicker = false
+    })
+}
+
+@Composable
+private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
+    val categories = listOf("全部", "域名", "IP/地理", "端口/网络", "进程", "规则集", "组合")
+    var query by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf(0) }
+    val entries = visualRuleTypes.filter { type ->
+        val categoryMatches = when (categories[category]) {
+            "域名" -> type.startsWith("DOMAIN") || type == "GEOSITE"
+            "IP/地理" -> type.contains("IP") || type.contains("GEO")
+            "端口/网络" -> type.contains("PORT") || type in setOf("NETWORK", "IN-TYPE", "DSCP")
+            "进程" -> type.startsWith("PROCESS") || type == "UID"
+            "规则集" -> type in setOf("RULE-SET", "SUB-RULE")
+            "组合" -> type in setOf("AND", "OR", "NOT", "MATCH")
+            else -> true
+        }
+        categoryMatches && (query.isBlank() || type.contains(query, true))
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+            tonalElevation = 8.dp,
+        ) {
+            Column(Modifier.padding(20.dp)) {
+                Text("选择规则类型", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(top = 12.dp), label = { Text("搜索类型") }, singleLine = true)
+                androidx.compose.foundation.lazy.LazyRow(contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(categories.size) { index -> androidx.compose.material3.FilterChip(selected = category == index, onClick = { category = index }, label = { Text(categories[index]) }) }
+                }
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(entries) { type ->
+                        Card(onClick = { onSelect(type) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (type == selected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.76f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.66f))) {
+                            Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) { Text(type, fontWeight = FontWeight.Medium); Text(ruleTypeDescription(type), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                if (type == selected) Text("已选", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TextButton(onClick = onDismiss) { Text("关闭") } }
+            }
+        }
+    }
+}
+
+private fun ruleTypeDescription(type: String): String = when {
+    type.startsWith("DOMAIN") -> "按域名匹配"
+    type == "GEOSITE" -> "按 Mihomo geodata 分类匹配"
+    type.contains("IP") || type.contains("GEO") -> "按 IP 地址或地理信息匹配"
+    type.contains("PORT") -> "按连接端口匹配"
+    type.startsWith("PROCESS") || type == "UID" -> "按发起连接的进程匹配"
+    type == "RULE-SET" -> "引用已配置的规则集提供者"
+    type == "SUB-RULE" -> "进入本地子规则集合"
+    type in setOf("AND", "OR", "NOT") -> "组合多个条件进行逻辑匹配"
+    type == "MATCH" -> "匹配其余所有流量并作为最后一条规则"
+    else -> "Mihomo $type 匹配类型"
 }
 
 @Composable
@@ -1075,6 +1335,25 @@ private fun safeYamlFileName(value: String): String {
     val clean = value.trim().replace("[\\\\/:*?\"<>|\\p{Cntrl}]".toRegex(), "_").trim('.', ' ')
         .removeSuffix(".yaml").removeSuffix(".yml").ifBlank { "鸡场" }
     return "$clean.yaml"
+}
+
+private fun saveRemoteToDownloads(context: Context, file: RemoteConfigFile) {
+    require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { "当前 Android 版本需要使用系统文件选择器保存" }
+    val resolver = context.contentResolver
+    val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+    val uri = resolver.insert(collection, ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, file.fileName)
+        put(MediaStore.Downloads.MIME_TYPE, "application/yaml")
+        put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/鸡场")
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }) ?: error("无法创建下载文件")
+    try {
+        checkNotNull(resolver.openOutputStream(uri, "wt")) { "无法写入下载文件" }.use { it.write(file.bytes) }
+        resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+    } catch (error: Throwable) {
+        resolver.delete(uri, null, null)
+        throw error
+    }
 }
 
 private fun saveToDownloads(context: Context, content: String, filename: String) {
