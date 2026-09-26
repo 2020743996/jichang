@@ -30,7 +30,7 @@ private val LightColors = lightColorScheme(
 )
 
 @Composable
-fun JichangTheme(glassOpacity: Float = 0.45f, content: @Composable () -> Unit) {
+fun JichangTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = LightColors,
         shapes = androidx.compose.material3.Shapes(
@@ -42,7 +42,6 @@ fun JichangTheme(glassOpacity: Float = 0.45f, content: @Composable () -> Unit) {
         ),
         content = {
             androidx.compose.runtime.CompositionLocalProvider(
-                LocalGlassTransparency provides glassOpacity,
                 androidx.compose.material3.LocalContentColor provides LightColors.onBackground,
                 content = content,
             )
