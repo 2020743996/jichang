@@ -112,7 +112,6 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -169,7 +168,6 @@ private enum class ExportAction { Download, Share }
 private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
-    val isDark = isSystemInDarkTheme()
     val motionEnabled = remember(context) {
         runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f }.getOrDefault(true)
     }
@@ -177,8 +175,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     SideEffect {
         (context as? Activity)?.window?.let { window ->
             WindowCompat.getInsetsController(window, localView).apply {
-                isAppearanceLightStatusBars = !isDark
-                isAppearanceLightNavigationBars = !isDark
+                isAppearanceLightStatusBars = true
+                isAppearanceLightNavigationBars = true
             }
         }
     }
@@ -297,7 +295,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
     }
 
-    JichangTheme(darkTheme = isDark, glassOpacity = glassOpacity) {
+    JichangTheme(glassOpacity = glassOpacity) {
         Scaffold(
             modifier = Modifier.fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
@@ -307,7 +305,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     liquidGlassScene.shader.setFloatUniform("topRadius", 0f)
                     liquidGlassScene.shader.setFloatUniform("bottomRadius", 0f)
                     liquidGlassScene.shader.setFloatUniform("opacity", glassOpacity)
-                    liquidGlassScene.shader.setFloatUniform("isDark", if (isDark) 1f else 0f)
                     renderEffect = liquidGlassScene.renderEffect
                 },
             contentWindowInsets = WindowInsets(0),
@@ -321,7 +318,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             val pos = coordinates.positionInRoot()
                             glassTopRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
                         }
-                        .glassMaterial(RectangleShape, isDark, glassOpacity),
+                        .glassMaterial(RectangleShape, glassOpacity),
                     actions = {
                         Box {
                             Row(
@@ -357,7 +354,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             val pos = coordinates.positionInRoot()
                             glassBottomRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
                         }
-                        .glassMaterial(RectangleShape, isDark, glassOpacity),
+                        .glassMaterial(RectangleShape, glassOpacity),
                     containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
                 ) {
@@ -549,7 +546,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     )
                     Text("只调整顶栏、底栏和分段控件。正文保持清晰。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        Text("玻璃预览", Modifier.glassMaterial(RoundedCornerShape(18.dp), isDark, glassOpacity).padding(horizontal = 28.dp, vertical = 12.dp), fontWeight = FontWeight.SemiBold)
+                        Text("玻璃预览", Modifier.glassMaterial(RoundedCornerShape(18.dp), glassOpacity).padding(horizontal = 28.dp, vertical = 12.dp), fontWeight = FontWeight.SemiBold)
                     }
                 }
             },
@@ -1027,7 +1024,7 @@ private fun TemplatePreviewDialog(template: com.jzb.jichang.android.model.Config
             shape = MaterialTheme.shapes.extraLarge,
             color = Color.Transparent,
             modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp)
-                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
+                .glassMaterial(MaterialTheme.shapes.extraLarge),
             tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1097,7 +1094,7 @@ private fun RemoteConfigDialog(
         ApplyDialogGlassBlur()
         Surface(
             modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight()
-                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
+                .glassMaterial(MaterialTheme.shapes.extraLarge),
             shape = MaterialTheme.shapes.extraLarge,
             color = Color.Transparent,
             tonalElevation = 0.dp,
@@ -1178,8 +1175,7 @@ private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit
 
 @Composable
 private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    val dark = isSystemInDarkTheme()
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(20.dp), dark).padding(4.dp)) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(20.dp)).padding(4.dp)) {
         labels.forEachIndexed { index, label ->
             TextButton(onClick = { onSelect(index) }, modifier = Modifier.weight(1f), colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
                 containerColor = if (selected == index) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f) else Color.Transparent,
@@ -1355,7 +1351,7 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
         ApplyDialogGlassBlur()
         Surface(
             modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp)
-                .glassMaterial(MaterialTheme.shapes.extraLarge, isSystemInDarkTheme()),
+                .glassMaterial(MaterialTheme.shapes.extraLarge),
             shape = MaterialTheme.shapes.extraLarge,
             color = Color.Transparent,
             tonalElevation = 0.dp,
