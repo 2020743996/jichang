@@ -1,4 +1,4 @@
-# 鸡场 Android
+# 鸡场
 
 原生 Android 订阅与节点管理器，面向 Mihomo 配置。应用只管理数据并生成 Mihomo YAML，不内置代理内核，也不接管 Android VPN。
 
