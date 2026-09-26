@@ -8,12 +8,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.background
@@ -78,6 +81,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
@@ -94,6 +99,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -112,6 +121,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material3.Slider
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jzb.jichang.android.model.AppState
@@ -152,7 +162,11 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val isDark = isSystemInDarkTheme()
+    val motionEnabled = remember(context) {
+        runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f }.getOrDefault(true)
+    }
     val localView = LocalView.current
+    val glassCornerRadiusPx = with(LocalDensity.current) { 20.dp.toPx() }
     SideEffect {
         (context as? Activity)?.window?.let { window ->
             WindowCompat.getInsetsController(window, localView).apply {
@@ -182,6 +196,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var templateToRename by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
     var templateToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
     var pendingSensitiveAction by remember { mutableStateOf<ExportAction?>(null) }
+    val glassPreferences = remember(context) { context.getSharedPreferences("appearance", Context.MODE_PRIVATE) }
+    var glassOpacity by remember { mutableStateOf(glassPreferences.getFloat("glass_opacity", 0.45f).coerceIn(0.2f, 0.7f)) }
+    var appearanceDialog by remember { mutableStateOf(false) }
+    val liquidGlassScene = remember { LiquidGlassScene() }
+    var glassTopRect by remember { mutableStateOf(Rect.Zero) }
+    var glassBottomRect by remember { mutableStateOf(Rect.Zero) }
     val scope = rememberCoroutineScope()
     val remoteDownloader = remember { RemoteConfigDownloader() }
     val shareController = remember { LocalShareController(context) }
@@ -270,26 +290,31 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
     }
 
-    JichangTheme(darkTheme = isDark) {
+    JichangTheme(darkTheme = isDark, glassOpacity = glassOpacity) {
         Scaffold(
-            modifier = Modifier.fillMaxSize().background(Brush.linearGradient(listOf(
-                MaterialTheme.colorScheme.background,
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.34f),
-                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.08f),
-                MaterialTheme.colorScheme.background,
-            ))),
+            modifier = Modifier.fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .graphicsLayer {
+                    liquidGlassScene.shader.setFloatUniform("topRect", glassTopRect.left, glassTopRect.top, glassTopRect.right, glassTopRect.bottom)
+                    liquidGlassScene.shader.setFloatUniform("bottomRect", glassBottomRect.left, glassBottomRect.top, glassBottomRect.right, glassBottomRect.bottom)
+                    liquidGlassScene.shader.setFloatUniform("topRadius", glassCornerRadiusPx)
+                    liquidGlassScene.shader.setFloatUniform("bottomRadius", glassCornerRadiusPx)
+                    liquidGlassScene.shader.setFloatUniform("opacity", glassOpacity)
+                    liquidGlassScene.shader.setFloatUniform("isDark", if (isDark) 1f else 0f)
+                    renderEffect = liquidGlassScene.renderEffect
+                },
             contentWindowInsets = WindowInsets(0),
             containerColor = Color.Transparent,
             topBar = {
                 TopAppBar(
-                    title = {
-                        Column {
-                            Text(page.label, fontWeight = FontWeight.SemiBold)
-                            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    },
+                    title = { Text(page.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                    modifier = Modifier.glassMaterial(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp), isDark),
+                    modifier = Modifier
+                        .onGloballyPositioned { coordinates ->
+                            val pos = coordinates.positionInRoot()
+                            glassTopRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
+                        }
+                        .glassMaterial(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp), isDark, glassOpacity),
                     actions = {
                         Box {
                             TextButton(onClick = { profileMenu = true }) { Text(profile.name, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null) }
@@ -300,6 +325,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 ) }
                                 DropdownMenuItem(text = { Text("新建配置…") }, onClick = { createProfileFromCurrent = true; dialog = DialogKind.Profile; profileMenu = false })
                                 DropdownMenuItem(text = { Text("管理当前配置…") }, onClick = { createProfileFromCurrent = false; dialog = DialogKind.Profile; profileMenu = false })
+                                DropdownMenuItem(text = { Text("外观与玻璃效果") }, onClick = { appearanceDialog = true; profileMenu = false })
                                 if (state.profiles.size > 1) DropdownMenuItem(text = { Text("删除当前配置") }, onClick = { showProfileDeleteConfirmation = profile.id; profileMenu = false })
                             }
                         }
@@ -310,7 +336,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             },
             bottomBar = {
                 NavigationBar(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(26.dp), isDark),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        .onGloballyPositioned { coordinates ->
+                            val pos = coordinates.positionInRoot()
+                            glassBottomRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
+                        }
+                        .glassMaterial(RoundedCornerShape(22.dp), isDark, glassOpacity),
                     containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
                 ) {
@@ -335,7 +366,10 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 AnimatedContent(
                     targetState = page,
                     modifier = Modifier.weight(1f),
-                    transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.985f)).togetherWith(fadeOut()) },
+                    transitionSpec = {
+                        if (motionEnabled) (fadeIn() + scaleIn(initialScale = 0.99f)).togetherWith(fadeOut())
+                        else EnterTransition.None togetherWith ExitTransition.None
+                    },
                     label = "main-page-transition",
                 ) { currentPage -> when (currentPage) {
                     AppPage.Home -> HomePage(state, onNavigate = { page = it }, modifier = Modifier.fillMaxSize())
@@ -469,30 +503,56 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             confirmButton = { TextButton(onClick = { viewModel.deleteProfile(targetId); showProfileDeleteConfirmation = null }) { Text("删除") } },
             dismissButton = { TextButton(onClick = { showProfileDeleteConfirmation = null }) { Text("取消") } })
     }
+    if (appearanceDialog) {
+        AlertDialog(
+            onDismissRequest = { appearanceDialog = false },
+            title = { Text("外观与玻璃效果") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("透明度　${(glassOpacity * 100).toInt()}%", style = MaterialTheme.typography.titleSmall)
+                    Slider(
+                        value = glassOpacity,
+                        onValueChange = { value ->
+                            glassOpacity = value
+                            glassPreferences.edit().putFloat("glass_opacity", value).apply()
+                        },
+                        valueRange = 0.2f..0.7f,
+                        steps = 9,
+                    )
+                    Text("只调整顶栏、底栏和分段控件。正文保持清晰。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                        Text("鸡场", Modifier.glassMaterial(RoundedCornerShape(18.dp), isDark, glassOpacity).padding(horizontal = 28.dp, vertical = 12.dp), fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { appearanceDialog = false }) { Text("完成") } },
+        )
+    }
 }
 
 @Composable
 private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
-    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("配置工作台", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("订阅、节点和分流策略，一页掌握。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("鸡场", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                Text("配置一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                Text("管理 Mihomo 配置与节点资源", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         item {
-            Card(onClick = { onNavigate(AppPage.Config) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Card(onClick = { onNavigate(AppPage.Config) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("当前配置", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.74f))
-                            Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Text("当前配置", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(profile.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                         }
-                        Icon(Icons.Outlined.Description, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Outlined.Description, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
                     }
-                    Text("${profile.enabledNodeIds.size} 个已启用节点   ·   ${profile.ruleProfile.rules.size} 条规则   ·   ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text("打开配置与分享  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("${profile.enabledNodeIds.size} 个节点  ·  ${profile.ruleProfile.rules.size} 条规则  ·  ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("编辑配置  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -509,11 +569,19 @@ private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: M
             }
         }
         item {
-            Text("常用入口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text("快捷入口", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
-        item { DashboardAction("订阅与节点", "管理来源和可用节点", Icons.Outlined.Devices) { onNavigate(AppPage.Resources) } }
-        item { DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Config) } }
-        item { DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen) { onNavigate(AppPage.Templates) } }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column {
+                    DashboardAction("订阅与节点", "管理来源和可用节点", Icons.Outlined.Devices) { onNavigate(AppPage.Resources) }
+                    androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
+                    DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Config) }
+                    androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
+                    DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen) { onNavigate(AppPage.Templates) }
+                }
+            }
+        }
     }
 }
 
@@ -530,15 +598,13 @@ private fun MetricCard(title: String, value: String, detail: String, modifier: M
 
 @Composable
 private fun DashboardAction(title: String, detail: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp).clickable(onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        }
     }
 }
 
