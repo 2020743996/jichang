@@ -92,11 +92,13 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Rect
@@ -104,6 +106,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
@@ -314,10 +317,19 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             val pos = coordinates.positionInRoot()
                             glassTopRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
                         }
-                        .glassMaterial(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp), isDark, glassOpacity),
+                        .glassMaterial(RectangleShape, isDark, glassOpacity),
                     actions = {
                         Box {
-                            TextButton(onClick = { profileMenu = true }) { Text(profile.name, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null) }
+                            Row(
+                                Modifier.clip(RoundedCornerShape(10.dp))
+                                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { profileMenu = true }
+                                    .padding(horizontal = 8.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(profile.name, maxLines = 1, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+                                Icon(Icons.Outlined.KeyboardArrowDown, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             DropdownMenu(expanded = profileMenu, onDismissRequest = { profileMenu = false }) {
                                 state.profiles.forEach { item -> DropdownMenuItem(
                                     text = { Text(if (item.id == profile.id) "✓ ${item.name}" else item.name) },
@@ -336,12 +348,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             },
             bottomBar = {
                 NavigationBar(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                    modifier = Modifier
                         .onGloballyPositioned { coordinates ->
                             val pos = coordinates.positionInRoot()
                             glassBottomRect = Rect(pos.x, pos.y, pos.x + coordinates.size.width, pos.y + coordinates.size.height)
                         }
-                        .glassMaterial(RoundedCornerShape(22.dp), isDark, glassOpacity),
+                        .glassMaterial(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp), isDark, glassOpacity),
                     containerColor = Color.Transparent,
                     tonalElevation = 0.dp,
                 ) {
