@@ -1,8 +1,14 @@
 package com.jzb.jichang.android
 
 import android.content.Intent
+import android.content.ContentValues
+import android.content.Context
+import android.app.Activity
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -34,6 +40,9 @@ import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Share
@@ -50,6 +59,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
@@ -62,6 +72,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +81,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +93,9 @@ import com.jzb.jichang.android.model.AppState
 import com.jzb.jichang.android.model.ProxyNode
 import com.jzb.jichang.android.model.PolicyGroup
 import com.jzb.jichang.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.service.ConfigExportOptions
+import com.jzb.jichang.android.service.ConfigSourceMode
+import com.jzb.jichang.android.service.NodeAutoGroups
 import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -87,55 +103,88 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = true
-            isAppearanceLightNavigationBars = true
-        }
         setContent { JichangApp() }
     }
 }
 
-private enum class AppPage(val label: String) { Sources("订阅"), Nodes("节点"), Rules("规则"), Export("配置") }
+private enum class AppPage(val label: String) { Home("首页"), Sources("订阅"), Nodes("节点"), Rules("规则"), Export("配置") }
 private enum class DialogKind { Source, Node, Group, Rule }
+private enum class ExportAction { Download, Share }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
-    var page by remember { mutableStateOf(AppPage.Sources) }
+    val isDark = isSystemInDarkTheme()
+    val localView = LocalView.current
+    SideEffect {
+        (context as? Activity)?.window?.let { window ->
+            WindowCompat.getInsetsController(window, localView).apply {
+                isAppearanceLightStatusBars = !isDark
+                isAppearanceLightNavigationBars = !isDark
+            }
+        }
+    }
+    var page by remember { mutableStateOf(AppPage.Home) }
     var dialog by remember { mutableStateOf<DialogKind?>(null) }
     var editingGroup by remember { mutableStateOf<PolicyGroup?>(null) }
+    var editingRule by remember { mutableStateOf<Pair<Int, com.jzb.jichang.android.model.RoutingRule>?>(null) }
+    var sourceMode by remember { mutableStateOf(ConfigSourceMode.EMBED_NODES) }
+    var excludedNodeIds by remember { mutableStateOf(emptySet<String>()) }
+    var regionOverrides by remember { mutableStateOf(emptyMap<String, String>()) }
+    var enabledRegions by remember { mutableStateOf(NodeAutoGroups.allKeys) }
+    var showExportSetup by remember { mutableStateOf(false) }
+    var pendingSensitiveAction by remember { mutableStateOf<ExportAction?>(null) }
     val shareController = remember { LocalShareController(context) }
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
-    var configText by remember { mutableStateOf(viewModel.generate().yaml) }
+    val generator = remember { MihomoConfigGenerator() }
+    val exportOptions = remember(sourceMode, excludedNodeIds, regionOverrides, enabledRegions) {
+        ConfigExportOptions(sourceMode, excludedNodeIds, regionOverrides, enabledRegions)
+    }
+    val generated = remember(state, exportOptions) { generator.generate(state, exportOptions) }
+    val configText = generated.yaml
 
-    val saveConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
+    val saveLegacyConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
         if (uri != null) {
             val content = configText
             viewModel.run {
-                withContext(Dispatchers.IO) { context.contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray()) } }
-                "Mihomo 配置已保存"
+                withContext(Dispatchers.IO) {
+                    checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法打开目标文件" }.use { it.write(content.toByteArray()) }
+                }
+                "配置已下载"
             }
         }
     }
 
     DisposableEffect(shareController) { onDispose { shareController.unbind() } }
-    LaunchedEffect(state) {
-        configText = viewModel.generate().yaml
-        shareController.updateConfig(configText)
+    LaunchedEffect(configText) { shareController.updateConfig(configText) }
+
+    fun downloadConfig() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            saveLegacyConfig.launch("鸡场.yaml")
+        } else viewModel.run {
+            withContext(Dispatchers.IO) { saveToDownloads(context, configText) }
+            "已下载到 Downloads/鸡场/鸡场.yaml"
+        }
     }
 
-    MaterialTheme {
+    fun requestExport(action: ExportAction) {
+        if (sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS && state.sources.any { it.enabled && it.providerCompatible == true }) pendingSensitiveAction = action
+        else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText)
+    }
+
+    JichangTheme(darkTheme = isDark) {
         Scaffold(
             contentWindowInsets = WindowInsets(0),
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = {
                         Column {
-                            Text(stringResource(R.string.app_name), fontWeight = FontWeight.SemiBold)
-                            Text("Mihomo 配置管理", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(page.label, fontWeight = FontWeight.SemiBold)
+                            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },
                     actions = {
@@ -149,6 +198,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 NavigationBar {
                     AppPage.entries.forEach { item ->
                         val icon = when (item) {
+                            AppPage.Home -> Icons.Outlined.Home
                             AppPage.Sources -> Icons.Outlined.CloudDownload
                             AppPage.Nodes -> Icons.Outlined.Devices
                             AppPage.Rules -> Icons.Outlined.Tune
@@ -169,20 +219,27 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     }
                 }
                 when (page) {
+                    AppPage.Home -> HomePage(state, onNavigate = { page = it }, modifier = Modifier.weight(1f))
                     AppPage.Sources -> SourcesPage(state, viewModel, { dialog = DialogKind.Source }, Modifier.weight(1f))
                     AppPage.Nodes -> NodesPage(state, viewModel, Modifier.weight(1f)) { dialog = DialogKind.Node }
-                    AppPage.Rules -> RulesPage(state, viewModel, Modifier.weight(1f), onEditGroup = { editingGroup = it; dialog = DialogKind.Group })
+                    AppPage.Rules -> RulesPage(
+                        state, viewModel, Modifier.weight(1f),
+                        onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
+                        onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
+                    )
                     AppPage.Export -> ExportPage(
                         state = state,
+                        options = exportOptions,
+                        generatedNodes = generated.exportedNodes,
+                        skippedNodes = generated.skippedNodes,
+                        referencedSubscriptions = generated.referencedSubscriptions,
                         configText = configText,
                         shareUrl = shareUrl,
                         shareError = shareError,
-                        onGenerate = {
-                            configText = viewModel.generate().yaml
-                            shareController.updateConfig(configText)
-                        },
-                        onSave = { saveConfig.launch("mihomo.yaml") },
-                        onShare = { shareController.start(configText) },
+                        onModeChange = { sourceMode = it },
+                        onOpenFilters = { showExportSetup = true },
+                        onDownload = { requestExport(ExportAction.Download) },
+                        onShare = { requestExport(ExportAction.Share) },
                         onStopShare = { shareController.stop() },
                         onShareLink = {
                             val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shareUrl)
@@ -203,8 +260,99 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             if (existing == null) viewModel.addGroup(name, type, members) else viewModel.updateGroup(existing.name, name, type, members)
             dialog = null; editingGroup = null
         })
-        DialogKind.Rule -> RuleDialog(state, onDismiss = { dialog = null }, onSave = { type, value, group -> viewModel.addRule(type, value, group); dialog = null })
+        DialogKind.Rule -> RuleDialog(state, editingRule, onDismiss = { dialog = null; editingRule = null }, onSave = { index, type, value, group, noResolve ->
+            if (index == null) viewModel.addRule(type, value, group, noResolve) else viewModel.updateRule(index, type, value, group, noResolve)
+            dialog = null; editingRule = null
+        })
         null -> Unit
+    }
+
+    if (showExportSetup) ExportSetupDialog(
+        state = state,
+        options = exportOptions,
+        excludedNodeIds = excludedNodeIds,
+        regionOverrides = regionOverrides,
+        onToggleNode = { id -> excludedNodeIds = if (id in excludedNodeIds) excludedNodeIds - id else excludedNodeIds + id },
+        onRegionChange = { id, key -> regionOverrides = regionOverrides + (id to key) },
+        onToggleRegion = { key -> enabledRegions = if (key in enabledRegions) enabledRegions - key else enabledRegions + key },
+        onDismiss = { showExportSetup = false },
+    )
+
+    pendingSensitiveAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingSensitiveAction = null },
+            title = { Text("配置包含机场订阅凭据") },
+            text = { Text("引用模式会把已启用订阅地址写进 YAML。拿到文件或局域网分享链接的人可以使用这些订阅。请只分享给可信对象。") },
+            confirmButton = { TextButton(onClick = {
+                pendingSensitiveAction = null
+                if (action == ExportAction.Download) downloadConfig() else shareController.start(configText)
+            }) { Text("继续") } },
+            dismissButton = { TextButton(onClick = { pendingSensitiveAction = null }) { Text("返回") } },
+        )
+    }
+}
+
+@Composable
+private fun HomePage(state: AppState, onNavigate: (AppPage) -> Unit, modifier: Modifier = Modifier) {
+    LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("你的配置，一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("订阅、策略与 Mihomo 配置都在本机管理。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Icon(Icons.Outlined.Hub, null, Modifier.size(38.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MetricCard("订阅", state.sources.count { it.enabled }.toString(), "${state.sources.size} 个来源", Modifier.weight(1f), AppPage.Sources, onNavigate)
+                MetricCard("可用节点", state.nodes.count { it.enabled }.toString(), "共 ${state.nodes.size} 个", Modifier.weight(1f), AppPage.Nodes, onNavigate)
+                MetricCard("规则", state.ruleProfile.rules.size.toString(), "${state.ruleProfile.groups.size} 个策略组", Modifier.weight(1f), AppPage.Rules, onNavigate)
+            }
+        }
+        item {
+            Text("快捷入口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        }
+        item {
+            DashboardAction("订阅管理", "刷新机场来源并在本机解析", Icons.Outlined.CloudDownload) { onNavigate(AppPage.Sources) }
+        }
+        item {
+            DashboardAction("节点筛选", "启用、停用或手动导入节点", Icons.Outlined.Devices) { onNavigate(AppPage.Nodes) }
+        }
+        item {
+            DashboardAction("规则与策略", "编辑分流规则和代理策略组", Icons.Outlined.Tune) { onNavigate(AppPage.Rules) }
+        }
+        item {
+            DashboardAction("生成 Mihomo 配置", "下载 YAML 或在局域网内分享", Icons.Outlined.Description) { onNavigate(AppPage.Export) }
+        }
+    }
+}
+
+@Composable
+private fun MetricCard(title: String, value: String, detail: String, modifier: Modifier, destination: AppPage, onNavigate: (AppPage) -> Unit) {
+    Card(onClick = { onNavigate(destination) }, modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DashboardAction(title: String, detail: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 
@@ -223,11 +371,17 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                             Text(source.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                             Text(runCatching { java.net.URI(source.url).host }.getOrNull() ?: "订阅地址", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        Switch(checked = source.enabled, onCheckedChange = { viewModel.toggleSource(source.id) })
                         IconButton(onClick = { viewModel.refreshSource(source.id) }) { Icon(Icons.Outlined.ArrowDownward, "刷新订阅") }
                         IconButton(onClick = { viewModel.removeSource(source.id) }) { Icon(Icons.Outlined.Delete, "删除订阅") }
                     }
                     val count = state.nodes.count { it.sourceId == source.id }
                     Text(if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 已更新" } ?: " · 尚未刷新"}", style = MaterialTheme.typography.bodySmall)
+                    if (source.enabled) when (source.providerCompatible) {
+                        true -> Text("已检测为 Mihomo YAML，可在配置中远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                        false -> Text("此订阅不是 Mihomo YAML；引用模式会把已解析节点内嵌。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                        null -> Text("尚未检测格式；刷新后可判断能否远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    }
                 }
             }
         }
@@ -263,9 +417,15 @@ private fun NodeRow(node: ProxyNode, onToggle: () -> Unit, onDelete: () -> Unit)
 }
 
 @Composable
-private fun RulesPage(state: AppState, viewModel: AppViewModel, modifier: Modifier = Modifier, onEditGroup: (PolicyGroup) -> Unit) {
+private fun RulesPage(
+    state: AppState,
+    viewModel: AppViewModel,
+    modifier: Modifier = Modifier,
+    onEditGroup: (PolicyGroup) -> Unit,
+    onEditRule: (Int, com.jzb.jichang.android.model.RoutingRule) -> Unit,
+) {
     LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { HeaderCard("策略组", "组可包含节点、其他组，或 DIRECT / REJECT。规则按列表顺序写入 Mihomo 配置。") }
+        item { HeaderCard("策略组", "选择规则要使用的策略。策略组支持手选、自动测速、故障转移和负载均衡。") }
         items(state.ruleProfile.groups, key = { it.name }) { group ->
             Card(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -280,16 +440,26 @@ private fun RulesPage(state: AppState, viewModel: AppViewModel, modifier: Modifi
                 }
             }
         }
-        item { Text("路由规则", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp)) }
-        if (state.ruleProfile.rules.isEmpty()) item { Text("还没有自定义规则；配置会自动追加 MATCH 兜底。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item {
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("路由规则", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text("按从上到下的顺序匹配，兜底规则始终最后执行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (state.ruleProfile.rules.isEmpty()) item { Text("还没有自定义规则；Mihomo 配置会自动追加 MATCH 兜底。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         items(state.ruleProfile.rules.size) { index ->
             val rule = state.ruleProfile.rules[index]
             Card(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("${rule.type}, ${rule.value}", style = MaterialTheme.typography.bodyMedium)
+                        Text(if (rule.type == "MATCH") "兜底规则" else "${rule.type}  ·  ${rule.value}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                         Text("→ ${rule.group}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
+                    IconButton(onClick = { viewModel.moveRule(index, -1) }, enabled = index > 0) { Icon(Icons.Outlined.KeyboardArrowUp, "上移规则") }
+                    IconButton(onClick = { viewModel.moveRule(index, 1) }, enabled = index < state.ruleProfile.rules.lastIndex) { Icon(Icons.Outlined.KeyboardArrowDown, "下移规则") }
+                    IconButton(onClick = { onEditRule(index, rule) }) { Icon(Icons.Outlined.Edit, "编辑规则") }
                     IconButton(onClick = { viewModel.removeRule(index) }) { Icon(Icons.Outlined.Delete, "删除规则") }
                 }
             }
@@ -301,29 +471,49 @@ private fun RulesPage(state: AppState, viewModel: AppViewModel, modifier: Modifi
 @Composable
 private fun ExportPage(
     state: AppState,
+    options: ConfigExportOptions,
+    generatedNodes: Int,
+    skippedNodes: Int,
+    referencedSubscriptions: Int,
     configText: String,
     shareUrl: String?,
     shareError: String?,
-    onGenerate: () -> Unit,
-    onSave: () -> Unit,
+    onModeChange: (ConfigSourceMode) -> Unit,
+    onOpenFilters: () -> Unit,
+    onDownload: () -> Unit,
     onShare: () -> Unit,
     onStopShare: () -> Unit,
     onShareLink: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val generated = remember(state) { MihomoConfigGenerator().generate(state) }
     Column(modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AssistChip(onClick = {}, label = { Text("${generated.exportedNodes} 个节点") })
-            if (generated.skippedNodes > 0) AssistChip(onClick = {}, label = { Text("跳过 ${generated.skippedNodes} 个不支持项") })
+        Card(Modifier.fillMaxWidth().padding(top = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Mihomo 配置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("${generatedNodes} 个内嵌节点${if (referencedSubscriptions > 0) " · $referencedSubscriptions 个订阅引用" else ""}${if (skippedNodes > 0) " · 跳过 $skippedNodes 个不支持节点" else ""}", style = MaterialTheme.typography.bodySmall)
+            }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(6.dp)); Text("重新生成") }
-            OutlinedButton(onClick = onSave, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Description, null); Spacer(Modifier.width(6.dp)); Text("保存 YAML") }
+        Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SourceModeCard("内嵌节点", "节点写进 YAML", options.sourceMode == ConfigSourceMode.EMBED_NODES, Modifier.weight(1f)) { onModeChange(ConfigSourceMode.EMBED_NODES) }
+            SourceModeCard("引用订阅", "Mihomo 远程更新", options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, Modifier.weight(1f)) { onModeChange(ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) }
+        }
+        if (options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS && state.sources.any { it.enabled }) {
+            Text(
+                if (referencedSubscriptions > 0) "订阅地址会写入配置文件；文件接收者可以使用这些订阅。" else "当前没有可远程引用的 Mihomo YAML 订阅；节点将以内嵌方式导出。",
+                color = if (referencedSubscriptions > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("筛选节点与地区策略组")
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = onDownload, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.CloudDownload, null); Spacer(Modifier.width(6.dp)); Text("下载配置") }
+            OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "局域网分享" else "更新分享") }
         }
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            Button(onClick = onShare, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(8.dp)); Text("开始局域网分享") }
         } else Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("局域网分享已开启", style = MaterialTheme.typography.titleSmall)
@@ -335,10 +525,26 @@ private fun ExportPage(
                 }
             }
         }
-        Text("Mihomo YAML 预览", style = MaterialTheme.typography.titleSmall)
-        Card(Modifier.fillMaxSize(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("配置预览", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text("YAML", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Card(Modifier.weight(1f).fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             SelectionContainer {
                 Text(configText, Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceModeCard(title: String, detail: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface)) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(selected = selected, onClick = onClick)
+            Column(Modifier.padding(start = 4.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -442,31 +648,152 @@ private fun GroupDialog(state: AppState, initial: PolicyGroup?, onDismiss: () ->
 }
 
 @Composable
-private fun RuleDialog(state: AppState, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
-    var type by remember { mutableStateOf("DOMAIN-SUFFIX") }
-    var value by remember { mutableStateOf("") }
-    var group by remember { mutableStateOf(state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT") }
+private fun RuleDialog(
+    state: AppState,
+    initial: Pair<Int, com.jzb.jichang.android.model.RoutingRule>?,
+    onDismiss: () -> Unit,
+    onSave: (Int?, String, String, String, Boolean) -> Unit,
+) {
+    val existing = initial?.second
+    var type by remember(initial) { mutableStateOf(existing?.type ?: "DOMAIN-SUFFIX") }
+    var value by remember(initial) { mutableStateOf(existing?.value.orEmpty()) }
+    var group by remember(initial) { mutableStateOf(existing?.group ?: state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT") }
+    var noResolve by remember(initial) { mutableStateOf(existing?.noResolve ?: false) }
     var typeExpanded by remember { mutableStateOf(false) }
     var groupExpanded by remember { mutableStateOf(false) }
+    val isMatch = type == "MATCH"
+    val canNoResolve = type in setOf("IP-CIDR", "IP-CIDR6", "GEOIP")
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加路由规则") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        title = { Text(if (initial == null) "新建规则" else "编辑规则") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("常用规则", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "google.com"; group = state.ruleProfile.groups.firstOrNull()?.name ?: "PROXY" }, label = { Text("Google") })
+                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "apple.com"; group = "DIRECT" }, label = { Text("Apple 直连") })
+                AssistChip(onClick = { type = "GEOIP"; value = "CN"; group = "DIRECT"; noResolve = true }, label = { Text("中国 IP") })
+            }
             Box {
-                OutlinedButton(onClick = { typeExpanded = true }) { Text(type) }
-                DropdownMenu(typeExpanded, { typeExpanded = false }) {
-                    listOf("DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "PROCESS-NAME").forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { type = option; typeExpanded = false }) }
+                OutlinedButton(onClick = { typeExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("规则类型：${if (isMatch) "兜底 (MATCH)" else type}") }
+                DropdownMenu(expanded = typeExpanded, onDismissRequest = { typeExpanded = false }) {
+                    val order = listOf("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD", "DOMAIN-REGEX", "GEOSITE", "IP-CIDR", "IP-CIDR6", "GEOIP", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "NETWORK", "MATCH")
+                    order.forEach { option -> DropdownMenuItem(text = { Text(if (option == "MATCH") "兜底 · MATCH" else option) }, onClick = { type = option; if (option == "MATCH") value = ""; typeExpanded = false }) }
                 }
             }
-            OutlinedTextField(value, { value = it }, label = { Text("匹配内容") }, singleLine = true)
+            if (!isMatch) OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text("匹配内容") }, placeholder = { Text(rulePlaceholder(type)) }, singleLine = true)
+            else Text("此规则会作为配置最后一条 Mihomo MATCH 兜底规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Box {
-                OutlinedButton(onClick = { groupExpanded = true }) { Text("策略组：$group") }
-                DropdownMenu(groupExpanded, { groupExpanded = false }) {
+                OutlinedButton(onClick = { groupExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("策略：$group") }
+                DropdownMenu(expanded = groupExpanded, onDismissRequest = { groupExpanded = false }) {
                     (state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")).distinct().forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { group = option; groupExpanded = false }) }
                 }
             }
+            if (canNoResolve) Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = noResolve, onCheckedChange = { noResolve = it })
+                Text("no-resolve", style = MaterialTheme.typography.bodyMedium)
+            }
         } },
-        confirmButton = { TextButton(onClick = { onSave(type, value, group) }, enabled = value.isNotBlank()) { Text("添加") } },
+        confirmButton = { TextButton(onClick = { onSave(initial?.first, type, value, group, noResolve) }, enabled = isMatch || value.isNotBlank()) { Text(if (initial == null) "添加规则" else "保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun ExportSetupDialog(
+    state: AppState,
+    options: ConfigExportOptions,
+    excludedNodeIds: Set<String>,
+    regionOverrides: Map<String, String>,
+    onToggleNode: (String) -> Unit,
+    onRegionChange: (String, String) -> Unit,
+    onToggleRegion: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val enabledSourceIds = state.sources.filter { it.enabled }.map { it.id }.toSet()
+    val nodes = state.nodes.filter { it.enabled && (it.sourceId == null || it.sourceId in enabledSourceIds) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("筛选节点与策略组") },
+        text = { Column(Modifier.height(480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("自动根据节点名称归类。你可以关闭某个地区组、排除节点或手动调整归属。", style = MaterialTheme.typography.bodySmall)
+            Text("地区策略组", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            NodeAutoGroups.regions.forEach { region ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = region.key in options.enabledRegions, onCheckedChange = { onToggleRegion(region.key) })
+                    Text(region.title)
+                    Spacer(Modifier.weight(1f))
+                    Text(nodes.count { (regionOverrides[it.id] ?: NodeAutoGroups.classify(it.name)) == region.key }.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = NodeAutoGroups.OTHER in options.enabledRegions, onCheckedChange = { onToggleRegion(NodeAutoGroups.OTHER) })
+                Text("其他")
+                Spacer(Modifier.weight(1f))
+                Text(nodes.count { (regionOverrides[it.id] ?: NodeAutoGroups.classify(it.name)) == NodeAutoGroups.OTHER }.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("包含节点", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+            nodes.forEach { node ->
+                var expanded by remember(node.id) { mutableStateOf(false) }
+                val selectedRegion = regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = node.id !in excludedNodeIds, onCheckedChange = { onToggleNode(node.id) })
+                    Column(Modifier.weight(1f)) {
+                        Text(node.name, style = MaterialTheme.typography.bodyMedium)
+                        Text("${node.type.uppercase()} · ${node.server}:${node.port}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Box {
+                        TextButton(onClick = { expanded = true }) { Text(NodeAutoGroups.title(selectedRegion)) }
+                        DropdownMenu(expanded, { expanded = false }) {
+                            (NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER).forEach { key ->
+                                DropdownMenuItem(text = { Text(NodeAutoGroups.title(key)) }, onClick = { onRegionChange(node.id, key); expanded = false })
+                            }
+                        }
+                    }
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
+}
+
+private fun rulePlaceholder(type: String): String = when (type) {
+    "DOMAIN", "DOMAIN-SUFFIX" -> "example.com"
+    "DOMAIN-KEYWORD" -> "google"
+    "IP-CIDR", "IP-CIDR6" -> "192.168.0.0/16"
+    "GEOIP" -> "CN"
+    "DST-PORT", "SRC-PORT" -> "443"
+    "GEOSITE" -> "category-ads-all"
+    "PROCESS-NAME" -> "com.example.app"
+    "NETWORK" -> "udp"
+    else -> "请输入规则值"
+}
+
+private fun saveToDownloads(context: Context, content: String) {
+    val resolver = context.contentResolver
+    val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+    val filename = "鸡场.yaml"
+    val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/鸡场"
+    val existingId = resolver.query(
+        collection,
+        arrayOf(MediaStore.Downloads._ID),
+        "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH}=?",
+        arrayOf(filename, relativePath),
+        null,
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+    val uri = existingId?.let { Uri.withAppendedPath(collection, it.toString()) } ?: resolver.insert(
+        collection,
+        ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, filename)
+            put(MediaStore.Downloads.MIME_TYPE, "application/yaml")
+            put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        },
+    ) ?: error("无法创建下载文件")
+    try {
+        checkNotNull(resolver.openOutputStream(uri, "wt")) { "无法写入下载文件" }.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+        resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+    } catch (error: Throwable) {
+        resolver.delete(uri, null, null)
+        throw error
+    }
 }

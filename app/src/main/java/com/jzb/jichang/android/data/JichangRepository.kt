@@ -73,9 +73,10 @@ class JichangRepository(private val dao: SnapshotDao) {
                 val body = it.body?.string().orEmpty()
                 val result = parser.parse(body, source.id)
                 if (result.nodes.isEmpty()) error("没有解析到可用节点（跳过 ${result.skippedCount} 条）")
+                val providerCompatible = body.trimStart('\uFEFF', ' ', '\n', '\r', '\t').startsWith("proxies:")
                 update { current ->
                     current.copy(
-                        sources = current.sources.map { item -> if (item.id == source.id) item.copy(updatedAt = System.currentTimeMillis(), lastError = null) else item },
+                        sources = current.sources.map { item -> if (item.id == source.id) item.copy(updatedAt = System.currentTimeMillis(), lastError = null, providerCompatible = providerCompatible) else item },
                         nodes = current.nodes.filterNot { node -> node.sourceId == source.id } + result.nodes,
                     )
                 }
@@ -89,6 +90,10 @@ class JichangRepository(private val dao: SnapshotDao) {
 
     suspend fun removeSource(sourceId: String) = update { state ->
         state.copy(sources = state.sources.filterNot { it.id == sourceId }, nodes = state.nodes.filterNot { it.sourceId == sourceId })
+    }
+
+    suspend fun toggleSource(sourceId: String) = update { state ->
+        state.copy(sources = state.sources.map { if (it.id == sourceId) it.copy(enabled = !it.enabled) else it })
     }
 
     suspend fun importNodes(raw: String): Pair<Int, Int> {
@@ -131,11 +136,43 @@ class JichangRepository(private val dao: SnapshotDao) {
         ))
     }
 
-    suspend fun addRule(type: String, value: String, group: String) = update { state ->
-        require(type.isNotBlank() && value.isNotBlank()) { "规则类型和匹配内容不能为空" }
+    suspend fun addRule(type: String, value: String, group: String, noResolve: Boolean = false) = update { state ->
+        require(type.uppercase() in com.jzb.jichang.android.service.MihomoConfigGenerator.supportedRuleTypes) { "规则类型无效" }
+        require(type.equals("MATCH", true) || value.isNotBlank()) { "请输入匹配内容" }
         require(group in state.ruleProfile.groups.map { it.name } || group in setOf("DIRECT", "REJECT")) { "请选择有效的策略组" }
         require(!value.contains(',') && !value.contains('\n') && !value.contains('\r')) { "匹配内容不能包含逗号或换行" }
-        state.copy(ruleProfile = state.ruleProfile.copy(rules = state.ruleProfile.rules + RoutingRule(type.uppercase(), value.trim(), group)))
+        val rule = RoutingRule(type.uppercase(), value.trim(), group, noResolve && type.uppercase() in setOf("IP-CIDR", "IP-CIDR6", "GEOIP"))
+        val rules = if (type.equals("MATCH", true)) state.ruleProfile.rules.filterNot { it.type.equals("MATCH", true) } + rule else state.ruleProfile.rules + rule
+        state.copy(ruleProfile = state.ruleProfile.copy(rules = rules))
+    }
+
+    suspend fun updateRule(index: Int, type: String, value: String, group: String, noResolve: Boolean) = update { state ->
+        require(index in state.ruleProfile.rules.indices) { "规则已不存在" }
+        require(type.uppercase() in com.jzb.jichang.android.service.MihomoConfigGenerator.supportedRuleTypes) { "规则类型无效" }
+        require(type.equals("MATCH", true) || value.isNotBlank()) { "请输入匹配内容" }
+        require(group in state.ruleProfile.groups.map { it.name } || group in setOf("DIRECT", "REJECT")) { "请选择有效的策略组" }
+        require(!value.contains(',') && !value.contains('\n') && !value.contains('\r')) { "匹配内容不能包含逗号或换行" }
+        val rule = RoutingRule(type.uppercase(), value.trim(), group, noResolve && type.uppercase() in setOf("IP-CIDR", "IP-CIDR6", "GEOIP"))
+        var rules = state.ruleProfile.rules.toMutableList().also { it[index] = rule }
+        if (type.equals("MATCH", true)) {
+            rules = (rules.filterNot { it.type.equals("MATCH", true) } + rule).toMutableList()
+        } else {
+            val fallback = rules.lastOrNull { it.type.equals("MATCH", true) }
+            rules = rules.filterNot { it.type.equals("MATCH", true) }.toMutableList().apply { fallback?.let(::add) }
+        }
+        state.copy(ruleProfile = state.ruleProfile.copy(rules = rules))
+    }
+
+    suspend fun moveRule(index: Int, offset: Int) = update { state ->
+        if (index !in state.ruleProfile.rules.indices) return@update state
+        if (state.ruleProfile.rules[index].type.equals("MATCH", true)) return@update state
+        val lastMovable = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type.equals("MATCH", true) }) 1 else 0
+        val destination = (index + offset).coerceIn(0, lastMovable.coerceAtLeast(0))
+        if (destination == index) return@update state
+        val rules = state.ruleProfile.rules.toMutableList()
+        val item = rules.removeAt(index)
+        rules.add(destination, item)
+        state.copy(ruleProfile = state.ruleProfile.copy(rules = rules))
     }
 
     suspend fun removeRule(index: Int) = update { state -> state.copy(ruleProfile = state.ruleProfile.copy(rules = state.ruleProfile.rules.filterIndexed { i, _ -> i != index })) }

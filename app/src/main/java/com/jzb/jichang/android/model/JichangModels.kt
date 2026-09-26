@@ -5,6 +5,7 @@ data class SubscriptionSource(
     val name: String,
     val url: String,
     val enabled: Boolean = true,
+    val providerCompatible: Boolean? = null,
     val updatedAt: Long? = null,
     val lastError: String? = null,
 )
@@ -30,6 +31,7 @@ data class RoutingRule(
     val type: String,
     val value: String,
     val group: String,
+    val noResolve: Boolean = false,
 )
 
 data class RuleProfile(
