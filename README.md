@@ -1,0 +1,21 @@
+# 鸡场 Android
+
+原生 Android 订阅与节点管理器，面向 Mihomo 配置。应用只管理数据并生成 Mihomo YAML，不内置代理内核，也不接管 Android VPN。
+
+## 当前功能
+
+- 本机添加和刷新 HTTP(S) 订阅；在设备上解析 Base64、Mihomo/Clash YAML、常见节点分享 URI 与基础 Surge 节点行。
+- 手动导入或删除节点，按名称/服务器筛选并选择是否写入配置。
+- 编辑 Mihomo 策略组与常见域名/IP 路由规则。
+- 预览或保存 Mihomo YAML；在本机开启带随机令牌的局域网配置链接，并可随时停止。
+- 订阅、节点与规则通过 Room 保存在本机，不启用云同步或第三方转换服务。
+
+目前 URI 解析覆盖 SS、VMess、VLESS、Trojan、Hysteria、Hysteria 2、TUIC、AnyTLS、SOCKS5 和 HTTP。YAML 输入保留节点字段；无法识别的行会计入跳过数。配置生成器仅输出一份 Mihomo 格式，不按 Clash 系 App 分流。
+
+## 获取应用
+
+请从 GitHub Releases 下载并安装 Android APK。本仓库发布应用源码与安装包，不附带构建脚本。
+
+## 局域网分享
+
+每次开启分享都会生成新的随机路径令牌；链接只绑定当前局域网接口，停止分享或系统关闭服务后失效。链接本身是访问凭据，请只发给可信对象。传输为 HTTP，适用于可信局域网；不应在公共 Wi-Fi 上分享。
