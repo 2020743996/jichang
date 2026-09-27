@@ -55,28 +55,31 @@ class MihomoConfigGenerator {
         }
         val supportedSelected = selectedNodes.filter { it.type.lowercase() in supportedTypes }
         val skipped = selectedNodes.size - supportedSelected.size
-        val boundTemplateSources = placeholderNames.mapNotNull { name ->
-            profile.templateProviderBindings[name]?.let { id -> enabledSources.firstOrNull { it.id == id && it.providerCompatible == true }?.let { name to it } }
-        }
-        val unresolvedTemplateProviders = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
-            placeholderNames.filter { name -> boundTemplateSources.none { it.first == name } }
-        } else emptyList()
         val providerSources = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
             enabledSources.filter { it.providerCompatible == true }
         } else emptyList()
+        val boundTemplateSources = placeholderNames.mapNotNull { name ->
+            val explicit = profile.templateProviderBindings[name]?.let { id -> providerSources.firstOrNull { it.id == id } }
+            val source = explicit ?: providerSources.singleOrNull()
+            source?.let { name to it }
+        }
+        val unresolvedTemplateProviders = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS && providerSources.size > 1) {
+            placeholderNames.filter { name -> boundTemplateSources.none { it.first == name } }
+        } else emptyList()
         val templateProviderNames = boundTemplateSources.associate { (name, source) -> source.id to name }
         val genericProviderSources = providerSources.filterNot { it.id in templateProviderNames.keys }
-        val providerNames = LinkedHashMap<String, String>().apply {
-            putAll(templateProviderNames)
-            genericProviderSources.forEachIndexed { index, source -> put(source.id, "订阅-${index + 1}") }
+        val providerNames = buildList {
+            addAll(boundTemplateSources.map { it.first })
+            addAll(genericProviderSources.indices.map { "订阅-${it + 1}" })
         }
+        val providerSourceIds = (boundTemplateSources.map { it.second.id } + genericProviderSources.map { it.id }).toSet()
         val embeddedNodes = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
-            supportedSelected.filter { it.sourceId == null || it.sourceId !in providerNames.keys }
+            supportedSelected.filter { it.sourceId == null || it.sourceId !in providerSourceIds }
         } else supportedSelected
         val names = uniqueNames(embeddedNodes)
         val proxies = embeddedNodes.mapIndexed { index, node -> proxyMap(node, names[index]) }
         val proxyNamesById = embeddedNodes.mapIndexed { index, node -> node.id to names[index] }.toMap()
-        val providerSnapshotNodes = state.nodes.filter { it.sourceId in providerNames.keys }
+        val providerSnapshotNodes = state.nodes.filter { it.sourceId in providerSourceIds }
         val selectedNodeIds = exportOptions.enabledNodeIds ?: state.nodes.filter { it.enabled }.map { it.id }.toSet()
         val includedRemoteNodes = providerSnapshotNodes.filter { it.id in selectedNodeIds && it.id !in exportOptions.excludedNodeIds }
         val regions = includedRemoteNodes.associate { node -> node.id to regionFor(node, exportOptions) }
@@ -84,31 +87,43 @@ class MihomoConfigGenerator {
             options = if (templateHasRegionalGroups) exportOptions.copy(enabledRegions = emptySet()) else exportOptions,
             embeddedNodes = embeddedNodes,
             embeddedNames = names,
-            providerNames = providerNames.values.toList(),
+            providerNames = providerNames,
             providerSnapshotNodes = providerSnapshotNodes,
             includedRemoteNodes = includedRemoteNodes,
             regions = regions,
         )
+
+        val placeholderProviderNames = placeholderNames.toSet()
+        val rawProviders = templateRoot["proxy-providers"].asStringMap().orEmpty()
+        val outputTemplateProviders = LinkedHashMap<String, Any?>().apply {
+            rawProviders.forEach { (name, value) -> if (name !in placeholderProviderNames) put(name, value) }
+            if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
+                boundTemplateSources.forEach { (name, source) ->
+                    val original = rawProviders[name].asStringMap().orEmpty()
+                    put(name, LinkedHashMap<String, Any?>().apply {
+                        putAll(original)
+                        put("url", source.url)
+                    })
+                }
+                genericProviderSources.forEachIndexed { index, source -> put("订阅-${index + 1}", subscriptionProvider(source, index + 1)) }
+            }
+        }
+        val availableTemplateProviderNames = outputTemplateProviders.keys
+        val removedPlaceholderNames = placeholderProviderNames - availableTemplateProviderNames
+        val groupsUsingTemplateProviders = profile.ruleProfile.groups.filter { group ->
+            (group.extra["use"] as? List<*>)?.any { it?.toString() in placeholderProviderNames } == true
+        }.map { it.name }.toSet()
 
         val ruleProfile = profile.ruleProfile
         val configuredGroups = ruleProfile.groups.filter { it.name.isNotBlank() }.ifEmpty { listOf(PolicyGroup("PROXY")) }.map { group ->
             if (placeholderNames.isEmpty()) group else {
                 val use = (group.extra["use"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
                 if (use.none { it in placeholderNames }) group else {
-                    val shouldInline = exportOptions.sourceMode == ConfigSourceMode.EMBED_NODES
-                    val unresolvedForGroup = if (shouldInline) placeholderNames.toSet() else unresolvedTemplateProviders.toSet()
-                    val remainingUse = use.filterNot { it in unresolvedForGroup }
-                    val hasFilter = group.extra.containsKey("filter") || group.extra.containsKey("exclude-filter")
-                    val localSourceIds = if (shouldInline) boundTemplateSources.filter { it.first in use }.map { it.second.id }.toSet() else emptySet()
-                    val localNames = embeddedNodes.filter { it.sourceId in localSourceIds }.mapNotNull { node ->
-                        proxyNamesById[node.id]
-                    }
+                    val remainingUse = use.filterNot { it in removedPlaceholderNames }
                     val extra = LinkedHashMap(group.extra).apply {
                         if (remainingUse.isEmpty()) remove("use") else put("use", remainingUse)
-                        if (shouldInline && hasFilter) put("include-all", true)
                     }
-                    val members = if (shouldInline && !hasFilter) (group.members + localNames).distinct() else group.members
-                    group.copy(members = members, extra = extra)
+                    group.copy(extra = extra)
                 }
             }
         }
@@ -127,7 +142,14 @@ class MihomoConfigGenerator {
                     proxyNamesById[id] ?: member.takeUnless { member.startsWith("node:") }
                 }
             }
-            val candidates = configuredMembers.filter { it in names || it in groupNames || it == "DIRECT" || it == "REJECT" }
+            val eligibleNodeNames = configuredMembers.filter { it in names }
+                .filter { nodeName ->
+                    val filter = group.extra["filter"]?.toString()
+                    val excludeFilter = group.extra["exclude-filter"]?.toString()
+                    (filter == null || matchesGroupFilter(nodeName, filter, group.name)) &&
+                        (excludeFilter == null || !matchesGroupFilter(nodeName, excludeFilter, group.name))
+                }
+            val candidates = (eligibleNodeNames + configuredMembers.filter { it in groupNames || it == "DIRECT" || it == "REJECT" }).distinct()
             linkedMapOf<String, Any?>(
                 "name" to group.name.safeName(),
                 "type" to (group.type.takeIf { it in setOf("select", "url-test", "fallback", "load-balance") } ?: "select"),
@@ -136,23 +158,30 @@ class MihomoConfigGenerator {
                 group.extra.forEach { (key, value) ->
                     if (key !in setOf("name", "type", "proxies")) put(key, value)
                 }
+                if (outputTemplateProviders.isEmpty() ||
+                    (group.name in groupsUsingTemplateProviders && group.name in groupNames &&
+                        group.extra["use"] == null && removedPlaceholderNames.isNotEmpty())
+                ) {
+                    remove("include-all-providers")
+                    remove("include-all")
+                }
                 if (group.type in setOf("url-test", "fallback", "load-balance")) {
                     putIfAbsent("url", "https://www.gstatic.com/generate_204")
                     putIfAbsent("interval", 300)
                 }
                 if (providerNames.isNotEmpty()) {
                     if (isGenerated) {
-                        put("use", providerNames.values.toList())
+                        put("use", providerNames)
                         generated.filters[group.name]?.let { filters ->
                             filters.first?.let { put("filter", it) }
                             filters.second?.let { put("exclude-filter", it) }
                         }
-                    } else if (!isDefaultMaster && group.extra["use"] == null) {
+                    } else if (!isDefaultMaster && group.extra["use"] == null && group.name !in groupsUsingTemplateProviders) {
                         val remoteMembers = if (group.members.isEmpty()) includedRemoteNodes else group.members.mapNotNull { member ->
                             if (member.startsWith("node:")) includedRemoteNodes.firstOrNull { it.id == member.removePrefix("node:") } else null
                         }
                         if (remoteMembers.isNotEmpty() || group.members.isEmpty()) {
-                            put("use", providerNames.values.toList())
+                            put("use", providerNames)
                             if (group.members.isNotEmpty()) put("filter", combinePatterns(remoteMembers.map { exactNamePattern(allNodeNames[it.id].orEmpty()) }) ?: "$^")
                         }
                     }
@@ -172,21 +201,6 @@ class MihomoConfigGenerator {
         val fallbackTarget = explicitFallback?.group?.takeIf { it in groupNames || it == "DIRECT" || it == "REJECT" } ?: fallbackDefault
         regularRules += "MATCH,$fallbackTarget"
 
-        val placeholderProviderNames = placeholderNames.toSet()
-        val rawProviders = templateRoot["proxy-providers"].asStringMap().orEmpty()
-        val outputTemplateProviders = LinkedHashMap<String, Any?>().apply {
-            rawProviders.forEach { (name, value) -> if (name !in placeholderProviderNames) put(name, value) }
-            if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
-                boundTemplateSources.forEach { (name, source) ->
-                    val original = rawProviders[name].asStringMap().orEmpty()
-                    put(name, LinkedHashMap<String, Any?>().apply {
-                        putAll(original)
-                        put("url", source.url)
-                    })
-                }
-                genericProviderSources.forEachIndexed { index, source -> put("订阅-${index + 1}", subscriptionProvider(source, index + 1)) }
-            }
-        }
         val root = LinkedHashMap<String, Any?>().apply {
             putAll(templateRoot)
             putIfAbsent("mixed-port", 7890)
@@ -345,6 +359,13 @@ class MihomoConfigGenerator {
 
     private fun regionFor(node: ProxyNode, options: ConfigExportOptions): String =
         options.regionOverrides[node.id]?.takeIf { it in NodeAutoGroups.allKeys } ?: NodeAutoGroups.classify(node.name)
+
+    private fun matchesGroupFilter(nodeName: String, expression: String, groupName: String): Boolean {
+        val regexMatch = runCatching { Regex(expression).containsMatchIn(nodeName) }.getOrNull()
+        if (regexMatch != null) return regexMatch
+        val expectedRegion = NodeAutoGroups.regionForGroupName(groupName) ?: return false
+        return NodeAutoGroups.classify(nodeName) == expectedRegion
+    }
 
     private fun combinePatterns(patterns: List<String>): String? = patterns.filter(String::isNotBlank).distinct().takeIf { it.isNotEmpty() }?.joinToString("|", "(", ")")
 

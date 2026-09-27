@@ -32,5 +32,17 @@ object NodeAutoGroups {
         }
     }
 
+    fun regionForGroupName(name: String): String? = regions.firstOrNull { region ->
+        name.contains(region.title, ignoreCase = true) || when (region.key) {
+            "hk" -> Regex("\\bHK\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇭🇰" in name
+            "tw" -> Regex("\\bTW\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇹🇼" in name
+            "jp" -> Regex("\\bJP\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇯🇵" in name
+            "sg" -> Regex("\\bSG\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇸🇬" in name
+            "us" -> Regex("\\bUS\\b|\\bUSA\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇺🇸" in name
+            "kr" -> Regex("\\bKR\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || "🇰🇷" in name
+            else -> false
+        }
+    }?.key
+
     fun title(key: String): String = regions.firstOrNull { it.key == key }?.title ?: "其他"
 }

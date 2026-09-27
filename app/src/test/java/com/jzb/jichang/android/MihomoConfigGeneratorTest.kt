@@ -24,6 +24,74 @@ import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
 
 class MihomoConfigGeneratorTest {
+    @Test fun clashMaxTemplateFiltersInlineNodesAndDropsPlaceholderWithoutSubscription() {
+        val template = ConfigTemplate("clash-max", "Clash Max", clashMaxTemplate, "Clash_Max.yaml")
+        val hk = ProxyNode("hk", null, "🇭🇰 香港 01", "ss", "hk.example", 443)
+        val us = ProxyNode("us", null, "🇺🇸 洛杉矶 01", "ss", "us.example", 443)
+        val jp = ProxyNode("jp", null, "🇯🇵 日本 01", "ss", "jp.example", 443)
+        val parsed = MihomoTemplateParser().parse(template.rawYaml)
+        val profile = ConfigProfile(
+            id = "clash-max-profile", name = "Clash Max", templateId = template.id,
+            enabledNodeIds = setOf(hk.id, us.id, jp.id), ruleProfile = parsed.ruleProfile,
+        )
+        val state = AppState(nodes = listOf(hk, us, jp), profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
+
+        val output = MihomoConfigGenerator().generate(state)
+        @Suppress("UNCHECKED_CAST")
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
+        @Suppress("UNCHECKED_CAST")
+        val groups = root["proxy-groups"] as List<Map<String, Any?>>
+        val hkGroup = groups.single { it["name"] == "🇭🇰 香港节点" }
+        val usGroup = groups.single { it["name"] == "🇺🇸 美国节点" }
+
+        assertEquals(listOf("🇭🇰 香港 01"), hkGroup["proxies"])
+        assertEquals(listOf("🇺🇸 洛杉矶 01"), usGroup["proxies"])
+        assertTrue(root["proxy-providers"] == null)
+        assertFalse(hkGroup.containsKey("include-all-providers"))
+        assertFalse(usGroup.containsKey("include-all-providers"))
+        assertEquals(emptyList<String>(), output.unresolvedTemplateProviders)
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+    }
+
+    @Test fun aSingleSelectedMihomoSubscriptionAutomaticallyBindsTemplateProvider() {
+        val source = SubscriptionSource("only", "唯一机场", "https://sub.example/config", providerCompatible = true)
+        val template = ConfigTemplate("clash-max", "Clash Max", clashMaxTemplate, "Clash_Max.yaml")
+        val node = ProxyNode("hk", source.id, "香港 01", "ss", "hk.example", 443)
+        val ruleProfile = MihomoTemplateParser().parse(template.rawYaml).ruleProfile
+        val profile = ConfigProfile(
+            id = "profile", name = "配置", templateId = template.id,
+            selectedSourceIds = setOf(source.id), enabledNodeIds = setOf(node.id),
+            sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name, ruleProfile = ruleProfile,
+        )
+        val state = AppState(listOf(source), listOf(node), listOf(profile), profile.id, listOf(template))
+        val output = MihomoConfigGenerator().generate(state)
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml.byteInputStream())
+        @Suppress("UNCHECKED_CAST")
+        val providers = root["proxy-providers"] as Map<String, Map<String, Any?>>
+
+        assertEquals("https://sub.example/config", providers.getValue("我的节点")["url"])
+        assertTrue(output.unresolvedTemplateProviders.isEmpty())
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+    }
+
+    @Test fun multipleSelectedSubscriptionsRequireExplicitTemplateBinding() {
+        val first = SubscriptionSource("one", "机场一", "https://one.example/config", providerCompatible = true)
+        val second = SubscriptionSource("two", "机场二", "https://two.example/config", providerCompatible = true)
+        val template = ConfigTemplate("clash-max", "Clash Max", clashMaxTemplate, "Clash_Max.yaml")
+        val profile = ConfigProfile(
+            id = "profile", name = "配置", templateId = template.id,
+            selectedSourceIds = setOf(first.id, second.id),
+            sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name,
+            ruleProfile = MihomoTemplateParser().parse(template.rawYaml).ruleProfile,
+        )
+        val state = AppState(sources = listOf(first, second), profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
+        val output = MihomoConfigGenerator().generate(state)
+
+        assertEquals(listOf("我的节点"), output.unresolvedTemplateProviders)
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+        assertFalse((output.yaml.substringAfter("proxy-providers:").substringBefore("proxy-groups:" )).contains("我的节点:"))
+    }
+
     @Test fun bindsTemplateProviderAndSuppressesDuplicateRegionalGroups() {
         val source = SubscriptionSource("source", "机场订阅", "https://sub.example/user/token", providerCompatible = true)
         val node = ProxyNode("hk-node", source.id, "香港 IEPL", "ss", "hk.example", 443)
@@ -73,18 +141,21 @@ class MihomoConfigGeneratorTest {
 
         assertTrue(root["proxy-providers"] == null)
         assertFalse(output.yaml.contains("机场的订阅地址"))
-        assertEquals(true, hk["include-all"])
+        @Suppress("UNCHECKED_CAST")
+        assertEquals(listOf("香港 IEPL"), hk["proxies"])
+        assertFalse(hk.containsKey("include-all"))
         assertEquals("香港", hk["filter"])
         assertEquals(0, groups.count { it["name"].toString().startsWith("🌏") })
     }
 
-    @Test fun unboundTemplatePlaceholderBlocksReferenceExportAndNeverLeaks() {
+    @Test fun templatePlaceholderIsRemovedWhenNoSubscriptionIsSelected() {
         val template = ConfigTemplate("template", "模板", regionalTemplate, "template.yaml")
         val profile = ConfigProfile(id = "profile", name = "配置", templateId = template.id, sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name)
         val state = AppState(profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
         val output = MihomoConfigGenerator().generate(state)
-        assertEquals(listOf("我的节点"), output.unresolvedTemplateProviders)
+        assertTrue(output.unresolvedTemplateProviders.isEmpty())
         assertFalse(output.yaml.contains("机场的订阅地址"))
+        assertFalse(output.yaml.contains("我的节点:"))
     }
 
     @Test fun emitsParsableMihomoYamlWithGroupsRulesAndOnlyEnabledNodes() {
@@ -274,5 +345,25 @@ class MihomoConfigGeneratorTest {
             interval: 300
         rules:
           - MATCH,香港自动选择
+    """.trimIndent()
+
+    private val clashMaxTemplate = """
+        mixed-port: 7892
+        proxies:
+          NodeParam: &NodeParam {type: http, interval: 86400, health-check: {enable: true, url: 'http://connectivitycheck.gstatic.com/generate_204', interval: 60}}
+        proxy-providers:
+          我的节点:
+            url: '机场的订阅地址'
+            <<: *NodeParam
+            path: './proxy_provider/Providers.yaml'
+        FilterHK: &FilterHK '^(?=.*((?i)🇭🇰|香港|(\b(HK|Hong)\b))).*$'
+        FilterUS: &FilterUS '^(?=.*((?i)🇺🇸|美国|洛杉矶|(\b(US|United States)\b))).*$'
+        FallBack: &FallBack {type: fallback, interval: 5, lazy: true, url: 'http://cp.cloudflare.com/generate_204', include-all-providers: true}
+        proxy-groups:
+          - {name: Proxy, type: select, proxies: [🇭🇰 香港节点, 🇺🇸 美国节点]}
+          - {name: 🇭🇰 香港节点, <<: *FallBack, filter: *FilterHK}
+          - {name: 🇺🇸 美国节点, <<: *FallBack, filter: *FilterUS}
+        rules:
+          - MATCH,Proxy
     """.trimIndent()
 }

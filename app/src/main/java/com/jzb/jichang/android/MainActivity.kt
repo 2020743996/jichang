@@ -237,7 +237,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             enabledNodeIds = profile.enabledNodeIds,
         )
     }
-    val generated = remember(state, profile) { generator.generate(state, profile, exportOptions) }
+    val generated = remember(state, profile, exportOptions) { generator.generate(state, profile, exportOptions) }
     val configText = generated.yaml
     val filename = remember(profile.fileName) { safeYamlFileName(profile.fileName) }
     var templateExportContent by remember { mutableStateOf<String?>(null) }
@@ -358,8 +358,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 if (state.profiles.size > 1) DropdownMenuItem(text = { Text("删除当前配置") }, onClick = { showProfileDeleteConfirmation = profile.id; profileMenu = false })
                             }
                         }
-                        if (page == AppPage.Resources && resourceTab == ResourceTab.Sources) IconButton(onClick = { dialog = DialogKind.Source }) { Icon(Icons.Outlined.Add, "添加订阅") }
-                        if (page == AppPage.Resources && resourceTab == ResourceTab.Nodes) IconButton(onClick = { dialog = DialogKind.Node }) { Icon(Icons.Outlined.Add, "添加节点") }
                     },
                 )
             },
@@ -463,7 +461,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             ConfigTab.Export -> ExportPage(
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
-                                configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
+        configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
                                 transferStats = shareStats,
                                 unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
@@ -685,6 +683,9 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                     Spacer(Modifier.width(6.dp)); Text("全部刷新")
                 }
             }
+            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("添加订阅")
+            }
         }
         if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "添加机场订阅，或到“节点”页直接导入节点链接。", onAdd) }
         items(state.sources, key = { it.id }) { source ->
@@ -703,7 +704,11 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                         IconButton(onClick = { viewModel.removeSource(source.id) }) { Icon(Icons.Outlined.Delete, "删除订阅") }
                     }
                     val count = state.nodes.count { it.sourceId == source.id }
-                    Text(if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 已更新" } ?: " · 尚未刷新"}", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 已更新" } ?: " · 尚未刷新"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (source.lastError != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     if (source.id in profile.selectedSourceIds) when (source.providerCompatible) {
                         true -> Text("已检测为 Mihomo YAML，可在配置中远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                         false -> Text("此订阅不是 Mihomo YAML；引用模式会把已解析节点内嵌。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
@@ -752,6 +757,9 @@ private fun NodesPage(
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("节点", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                     Text("启用状态和地区归属按当前配置保存", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("添加节点")
                 }
                 OutlinedTextField(
                     value = query,
@@ -1040,14 +1048,22 @@ private fun ExportPage(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        if (templateParameters.isNotEmpty()) {
+        val referenceMode = options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS
+        val compatibleSelectedSources = state.sources.filter { it.id in profile.selectedSourceIds && it.providerCompatible == true }
+        if (referenceMode && templateParameters.isNotEmpty() && compatibleSelectedSources.isEmpty()) {
+            Text("当前没有可引用的 Mihomo 订阅；模板占位 provider 会从导出中移除，节点按内嵌模式处理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (referenceMode && templateParameters.isNotEmpty() && compatibleSelectedSources.size == 1) {
+            Text("模板机场参数使用唯一的兼容订阅：${compatibleSelectedSources.single().name}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (referenceMode && templateParameters.isNotEmpty() && compatibleSelectedSources.size > 1) {
             Text("模板机场绑定", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text("绑定到资源中的 Mihomo 订阅。链接保存在订阅资源中，模板不会保存或改写机场凭据。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             templateParameters.forEach { parameter ->
                 TemplateProviderBindingRow(
                     parameter = parameter,
-                    selectedSourceId = templateBindings[parameter.providerName],
-                    sources = state.sources.filter { it.id in profile.selectedSourceIds && it.providerCompatible == true },
+                    selectedSourceId = templateBindings[parameter.providerName]?.takeIf { id -> compatibleSelectedSources.any { it.id == id } },
+                    sources = compatibleSelectedSources,
                     onSelect = { onTemplateBinding(parameter.providerName, it) },
                 )
             }
@@ -1227,12 +1243,10 @@ private fun TemplatesPage(
 @Composable
 private fun TemplatePreviewDialog(template: com.jzb.jichang.android.model.ConfigTemplate, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ApplyDialogGlassBlur()
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
-            color = Color.Transparent,
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp)
-                .glassMaterial(MaterialTheme.shapes.extraLarge),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp),
             tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1299,12 +1313,10 @@ private fun RemoteConfigDialog(
     var url by remember { mutableStateOf("") }
     var fileName by remember { mutableStateOf("") }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ApplyDialogGlassBlur()
         Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight()
-                .glassMaterial(MaterialTheme.shapes.extraLarge),
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight(),
             shape = MaterialTheme.shapes.extraLarge,
-            color = Color.Transparent,
+            color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1556,12 +1568,10 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
         categoryMatches && (query.isBlank() || type.contains(query, true))
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ApplyDialogGlassBlur()
         Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp)
-                .glassMaterial(MaterialTheme.shapes.extraLarge),
+            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp),
             shape = MaterialTheme.shapes.extraLarge,
-            color = Color.Transparent,
+            color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp,
         ) {
             Column(Modifier.padding(20.dp)) {
