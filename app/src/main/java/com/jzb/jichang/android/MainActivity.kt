@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
@@ -36,11 +37,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Delete
@@ -69,8 +70,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -81,6 +80,9 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -103,13 +105,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -119,7 +122,6 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -132,8 +134,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -174,9 +174,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppPage(val label: String) { Home("概览"), Share("分享"), Resources("资源") }
+private enum class AppPage(val label: String) { Home("概览"), Resources("资源"), Rules("规则"), Share("分享") }
 private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("节点"), Templates("模板") }
-private enum class ConfigTab(val label: String) { Rules("规则"), Export("分享") }
+private enum class RuleSection(val label: String) { List("规则"), Groups("策略组"), Providers("规则集"), SubRules("子规则"), Diagnostics("校验") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
 
@@ -221,6 +221,36 @@ private fun JichangDialogSurface(modifier: Modifier = Modifier, content: @Compos
     )
 }
 
+@Composable
+private fun FullScreenEditorDialog(
+    title: String,
+    dirty: Boolean,
+    valid: Boolean,
+    saveLabel: String = "保存",
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    var confirmDiscard by remember { mutableStateOf(false) }
+    fun requestDismiss() { if (dirty) confirmDiscard = true else onDismiss() }
+    Dialog(onDismissRequest = ::requestDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = ::requestDismiss) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
+                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Button(onClick = onSave, enabled = valid) { Text(saveLabel) }
+                }
+                Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = JichangSpacing.pageHorizontal)) { content() }
+            }
+        }
+    }
+    if (confirmDiscard) JichangAlertDialog(onDismissRequest = { confirmDiscard = false }, title = { Text("放弃未保存修改？") },
+        text = { Text("返回后本次编辑的内容不会保存。") },
+        confirmButton = { TextButton(onClick = { confirmDiscard = false; onDismiss() }) { Text("放弃修改", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("继续编辑") } })
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun JichangApp(viewModel: AppViewModel = viewModel()) {
@@ -238,9 +268,10 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             }
         }
     }
-    var page by remember { mutableStateOf(AppPage.Home) }
-    var resourceTab by remember { mutableStateOf(ResourceTab.Sources) }
-    var configTab by remember { mutableStateOf(ConfigTab.Rules) }
+    var page by rememberSaveable { mutableStateOf(AppPage.Home) }
+    var resourceTab by rememberSaveable { mutableStateOf(ResourceTab.Sources) }
+    var ruleSection by rememberSaveable { mutableStateOf(RuleSection.List) }
+    var showYamlPreview by rememberSaveable { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<DialogKind?>(null) }
     var providerInitialType by remember { mutableStateOf<String?>(null) }
     var editingGroup by remember { mutableStateOf<PolicyGroup?>(null) }
@@ -267,12 +298,28 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var glassTopRect by remember { mutableStateOf(Rect.Zero) }
     var glassBottomRect by remember { mutableStateOf(Rect.Zero) }
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(viewModel.message) {
+        viewModel.message?.let { snackbarHostState.showSnackbar(it, duration = if (viewModel.messageIsError) SnackbarDuration.Long else SnackbarDuration.Short) }
+    }
     val remoteDownloader = remember { RemoteConfigDownloader() }
     val shareController = remember { LocalShareController(context) }
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
     val generator = remember { MihomoConfigGenerator() }
     val profile = state.activeProfile
+    LaunchedEffect(profile.id) {
+        ruleSection = RuleSection.List
+        showYamlPreview = false
+    }
+    val inDetail = (page == AppPage.Rules && ruleSection != RuleSection.List) || (page == AppPage.Share && showYamlPreview)
+    BackHandler(enabled = inDetail || page != AppPage.Home) {
+        when {
+            page == AppPage.Rules && ruleSection != RuleSection.List -> ruleSection = RuleSection.List
+            page == AppPage.Share && showYamlPreview -> showYamlPreview = false
+            else -> page = AppPage.Home
+        }
+    }
     val parsedTemplate = remember(profile.templateId, state.templates) {
         profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id }?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() } }
     }
@@ -373,9 +420,15 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 },
             contentWindowInsets = WindowInsets(0),
             containerColor = Color.Transparent,
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 TopAppBar(
-                    title = { Text(page.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
+                    title = { Text(if (page == AppPage.Rules) ruleSection.label else if (showYamlPreview && page == AppPage.Share) "配置预览" else page.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
+                    navigationIcon = {
+                        if (inDetail) IconButton(onClick = { if (page == AppPage.Rules) ruleSection = RuleSection.List else showYamlPreview = false }) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                        }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                     modifier = Modifier
                         .onGloballyPositioned { coordinates ->
@@ -392,13 +445,13 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Text(profile.name, maxLines = 1, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+                                Text(profile.name, modifier = Modifier.widthIn(max = 132.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
                                 Icon(Icons.Outlined.KeyboardArrowDown, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             DropdownMenu(expanded = profileMenu, onDismissRequest = { profileMenu = false }) {
                                 state.profiles.forEach { item -> DropdownMenuItem(
                                     text = { Text(if (item.id == profile.id) "✓ ${item.name}" else item.name) },
-                                    onClick = { viewModel.switchProfile(item.id); profileMenu = false },
+                                    onClick = { viewModel.switchProfile(item.id); ruleSection = RuleSection.List; showYamlPreview = false; profileMenu = false },
                                 ) }
                                 DropdownMenuItem(text = { Text("新建配置…") }, onClick = { createProfileFromCurrent = true; dialog = DialogKind.Profile; profileMenu = false })
                                 DropdownMenuItem(text = { Text("管理当前配置…") }, onClick = { createProfileFromCurrent = false; dialog = DialogKind.Profile; profileMenu = false })
@@ -410,6 +463,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 )
             },
             bottomBar = {
+                if (!inDetail) {
                 NavigationBar(
                     modifier = Modifier
                         .onGloballyPositioned { coordinates ->
@@ -423,12 +477,13 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     AppPage.entries.forEach { item ->
                         val icon = when (item) {
                             AppPage.Home -> Icons.Outlined.Home
-                            AppPage.Share -> Icons.Outlined.Share
                             AppPage.Resources -> Icons.Outlined.Devices
+                            AppPage.Rules -> Icons.Outlined.Tune
+                            AppPage.Share -> Icons.Outlined.Share
                         }
                         NavigationBarItem(
                             selected = page == item,
-                            onClick = { page = item },
+                            onClick = { page = item; ruleSection = RuleSection.List; showYamlPreview = false },
                             icon = { Icon(icon, null) },
                             label = { Text(item.label) },
                             colors = NavigationBarItemDefaults.colors(
@@ -441,14 +496,10 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         )
                     }
                 }
+                }
             },
         ) { insets ->
             Column(Modifier.fillMaxSize().padding(insets)) {
-                viewModel.message?.let { message ->
-                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                        Text(message, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall, color = if (viewModel.messageIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-                    }
-                }
                 AnimatedContent(
                     targetState = page,
                     modifier = Modifier.weight(1f),
@@ -462,6 +513,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         state = state,
                         onNavigate = { page = it },
                         onOpenTemplates = { page = AppPage.Resources; resourceTab = ResourceTab.Templates },
+                        onOpenIssues = { page = AppPage.Rules; ruleSection = RuleSection.Diagnostics },
                         modifier = Modifier.fillMaxSize(),
                     )
                     AppPage.Resources -> Column(Modifier.fillMaxSize()) {
@@ -495,38 +547,35 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                     }
-                    AppPage.Share -> Column(Modifier.fillMaxSize()) {
-                        SegmentedTabs(ConfigTab.entries.map { it.label }, configTab.ordinal) { configTab = ConfigTab.entries[it] }
-                        when (configTab) {
-                            ConfigTab.Rules -> RulesPage(
-                                state, viewModel, Modifier.weight(1f),
-                                onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
-                                onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
-                                onAddRule = { editingRule = null; dialog = DialogKind.Rule },
-                                onAddGroup = { editingGroup = null; dialog = DialogKind.Group },
-                                onProviders = { type -> providerInitialType = type; dialog = DialogKind.Providers },
-                                onSaveRuleProfile = viewModel::saveRuleProfile,
-                            )
-                            ConfigTab.Export -> ExportPage(
+                    AppPage.Rules -> key(profile.id) { RulesPage(
+                        state, viewModel, section = ruleSection, onSectionChange = { ruleSection = it }, modifier = Modifier.fillMaxSize(),
+                        onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
+                        onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
+                        onAddRule = { editingRule = null; dialog = DialogKind.Rule },
+                        onAddGroup = { editingGroup = null; dialog = DialogKind.Group },
+                        onProviders = { type -> providerInitialType = type; dialog = DialogKind.Providers },
+                        onSaveRuleProfile = viewModel::saveRuleProfile,
+                    ) }
+                    AppPage.Share -> if (showYamlPreview) YamlPreviewPage(configText, Modifier.fillMaxSize()) else ExportPage(
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
-        configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
+                                shareUrl = shareUrl, shareError = shareError, filename = filename,
                                 unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
                                 templateBindings = profile.templateProviderBindings,
-                                ruleIssues = RuleDiagnostics.inspect(profile.ruleProfile, state.nodes.map { it.id }.toSet()),
+                                ruleIssues = currentRuleIssues(state),
                                 hasRegionalProxyGroups = parsedTemplate?.hasRegionalProxyGroups == true,
                                 onTemplateBinding = viewModel::bindTemplateProvider,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
                                 onOpenFilters = { showExportSetup = true }, onDownload = { requestExport(ExportAction.Download) },
                                 onShare = { requestExport(ExportAction.Share) }, onStopShare = { shareController.stop() },
+                                onOpenIssues = { page = AppPage.Rules; ruleSection = RuleSection.Diagnostics },
+                                onPreview = { showYamlPreview = true },
                                 onShareLink = {
                                     val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shareUrl)
                                     context.startActivity(Intent.createChooser(intent, "分享配置链接"))
-                                }, modifier = Modifier.weight(1f),
+                                }, modifier = Modifier.fillMaxSize(),
                             )
-                        }
-                    }
 
                 } }
             }
@@ -544,8 +593,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     templateToCreate?.let { template -> TemplateCreateDialog(template, onDismiss = { templateToCreate = null }, onCreate = { name, fileName ->
         viewModel.createProfileFromTemplate(name, fileName, template.id)
         templateToCreate = null
-        page = AppPage.Share
-        configTab = ConfigTab.Rules
+        page = AppPage.Rules
+        ruleSection = RuleSection.List
     }) }
     templateToRename?.let { template -> TemplateRenameDialog(template, onDismiss = { templateToRename = null }, onRename = { name ->
         viewModel.renameTemplate(template.id, name)
@@ -639,86 +688,44 @@ private fun HomePage(
     state: AppState,
     onNavigate: (AppPage) -> Unit,
     onOpenTemplates: () -> Unit,
+    onOpenIssues: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profile = state.activeProfile
+    val issues = currentRuleIssues(state)
+    val blocking = issues.count { !it.warning }
+    val selectedNodes = state.nodes.count { it.id in profile.enabledNodeIds && (it.sourceId == null || it.sourceId in profile.selectedSourceIds) }
     LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("配置一目了然", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                Text("管理 Mihomo 配置与节点资源", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("当前配置", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("$selectedNodes 个可用节点 · ${profile.ruleProfile.rules.size} 条规则 · ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         item {
-            Card(onClick = { onNavigate(AppPage.Share) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(Modifier.fillMaxWidth().padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("当前配置", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(profile.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                        }
-                        Icon(Icons.Outlined.Description, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+            Card(onClick = if (issues.isEmpty()) ({ onNavigate(AppPage.Share) }) else onOpenIssues, colors = CardDefaults.cardColors(containerColor = if (blocking > 0) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surface)) {
+                Row(Modifier.fillMaxWidth().padding(JichangSpacing.card), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(if (blocking > 0) "需要修正规则" else if (issues.isNotEmpty()) "有 ${issues.size} 项规则提醒" else "可以预览或分享", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(if (blocking > 0) "$blocking 个错误会阻止导出，点击查看校验。" else if (issues.isNotEmpty()) "可能冲突仅供检查，点击查看。" else "配置校验正常，进入分享页生成 YAML。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Text("${profile.enabledNodeIds.size} 个节点  ·  ${profile.ruleProfile.rules.size} 条规则  ·  ${profile.ruleProfile.groups.size} 个策略组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("打开规则与分享  →", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("查看", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("订阅来源", "${state.sources.size}", "${profile.selectedSourceIds.size} 个用于此配置", Modifier.weight(1f)) { onNavigate(AppPage.Resources) }
-                MetricCard("节点资源", "${state.nodes.size}", "${profile.enabledNodeIds.size} 个已启用", Modifier.weight(1f)) { onNavigate(AppPage.Resources) }
-            }
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("分流规则", "${profile.ruleProfile.rules.size}", "${profile.ruleProfile.groups.size} 个策略组", Modifier.weight(1f)) { onNavigate(AppPage.Share) }
-                MetricCard("本地模板", "${state.templates.size}", "可作为新配置起点", Modifier.weight(1f), onOpenTemplates)
-            }
-        }
-        item {
-            Text("快捷入口", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        }
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column {
-                    DashboardAction("订阅与节点", "管理来源和可用节点", Icons.Outlined.Devices) { onNavigate(AppPage.Resources) }
-                    androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
-                    DashboardAction("规则与分享", "编辑 Mihomo 规则，预览或分享配置", Icons.Outlined.Tune) { onNavigate(AppPage.Share) }
-                    androidx.compose.material3.HorizontalDivider(Modifier.padding(start = 54.dp))
-                    DashboardAction("模板库", "从远程 Mihomo YAML 建立模板", Icons.Outlined.FolderOpen, onOpenTemplates)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetricCard(title: String, value: String, detail: String, modifier: Modifier, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun DashboardAction(title: String, detail: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp).clickable(onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        item { Text("继续操作", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+        item { RuleManagementEntry("准备资源", "${profile.selectedSourceIds.size} 个订阅已选 · $selectedNodes 个节点可用") { onNavigate(AppPage.Resources) } }
+        item { RuleManagementEntry("整理规则", "${profile.ruleProfile.rules.size} 条分流规则 · ${profile.ruleProfile.providers.size} 个规则集") { onNavigate(AppPage.Rules) } }
+        item { RuleManagementEntry("导出与分享", "设置节点来源、预览配置并下载或分享") { onNavigate(AppPage.Share) } }
+        item { TextButton(onClick = onOpenTemplates) { Text("从模板开始新配置") } }
     }
 }
 
 @Composable
 private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
+    var sourceToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.SubscriptionSource?>(null) }
     LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -726,18 +733,17 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                     Text("订阅资源", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                     Text("当前配置启用 ${profile.selectedSourceIds.size} / ${state.sources.size}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                OutlinedButton(onClick = { viewModel.refreshAllSources() }, enabled = state.sources.isNotEmpty() && viewModel.refreshingSourceIds.isEmpty()) {
-                    if (viewModel.refreshingSourceIds.isNotEmpty()) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Outlined.ArrowDownward, null)
-                    Spacer(Modifier.width(6.dp)); Text("全部刷新")
-                }
+                Button(onClick = onAdd) { Icon(Icons.Outlined.Add, null); Text("订阅") }
             }
-            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("添加订阅")
+            TextButton(onClick = { viewModel.refreshAllSources() }, enabled = state.sources.isNotEmpty() && viewModel.refreshingSourceIds.isEmpty()) {
+                if (viewModel.refreshingSourceIds.isNotEmpty()) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Outlined.ArrowDownward, null)
+                Spacer(Modifier.width(6.dp)); Text("刷新全部订阅")
             }
         }
         if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "使用上方按钮添加机场订阅，或到“节点”页直接导入节点链接。") }
         items(state.sources, key = { it.id }) { source ->
+            var menuExpanded by remember(source.id) { mutableStateOf(false) }
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -746,11 +752,13 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                             Text(runCatching { java.net.URI(source.url).host }.getOrNull() ?: "订阅地址", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(checked = source.id in profile.selectedSourceIds, onCheckedChange = { viewModel.toggleSource(source.id) })
-                        IconButton(onClick = { viewModel.refreshSource(source.id) }, enabled = source.id !in viewModel.refreshingSourceIds) {
-                            if (source.id in viewModel.refreshingSourceIds) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                            else Icon(Icons.Outlined.ArrowDownward, "刷新订阅")
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, "订阅操作") }
+                            DropdownMenu(menuExpanded, { menuExpanded = false }) {
+                                DropdownMenuItem(text = { Text("刷新") }, enabled = source.id !in viewModel.refreshingSourceIds, onClick = { menuExpanded = false; viewModel.refreshSource(source.id) })
+                                DropdownMenuItem(text = { Text("删除") }, onClick = { menuExpanded = false; sourceToDelete = source })
+                            }
                         }
-                        IconButton(onClick = { viewModel.removeSource(source.id) }) { Icon(Icons.Outlined.Delete, "删除订阅") }
                     }
                     val count = state.nodes.count { it.sourceId == source.id }
                     Text(
@@ -767,6 +775,10 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
             }
         }
     }
+    sourceToDelete?.let { source -> JichangAlertDialog(onDismissRequest = { sourceToDelete = null },
+        title = { Text("删除订阅？") }, text = { Text("将删除“${source.name}”及其导入的节点。") },
+        confirmButton = { TextButton(onClick = { viewModel.removeSource(source.id); sourceToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { sourceToDelete = null }) { Text("取消") } }) }
 }
 
 @Composable
@@ -782,12 +794,16 @@ private fun NodesPage(
     var sourceFilter by remember { mutableStateOf("全部来源") }
     var enabledFilter by remember { mutableStateOf("全部") }
     var regionFilter by remember { mutableStateOf("全部地区") }
+    var filtersExpanded by remember { mutableStateOf(false) }
+    var bulkActions by remember { mutableStateOf(false) }
     var expandedProtocol by remember { mutableStateOf(false) }
     var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
+    var nodeToDelete by remember { mutableStateOf<ProxyNode?>(null) }
     val profile = state.activeProfile
     val regionKeys = NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER
     val regions = listOf("全部地区") + regionKeys.map(NodeAutoGroups::title)
     val protocols = listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted()
+    val filtersActive = protocolFilter != "全部协议" || sourceFilter != "全部来源" || enabledFilter != "全部" || regionFilter != "全部地区"
     val filtered = state.nodes.filter { node ->
         val selectedRegion = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
         (query.isBlank() || node.name.contains(query, true) || node.server.contains(query, true)) &&
@@ -807,9 +823,7 @@ private fun NodesPage(
                     Text("节点", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                     Text("启用状态和地区归属按当前配置保存", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("添加节点")
-                }
+                Button(onClick = onAdd) { Icon(Icons.Outlined.Add, null); Text("添加节点") }
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -817,7 +831,13 @@ private fun NodesPage(
                     label = { Text("搜索节点名称或服务器") },
                     singleLine = true,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${filtered.size} 个结果", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = { filtersExpanded = !filtersExpanded }) { Text(if (filtersExpanded) "收起筛选" else if (filtersActive) "筛选中" else "筛选") }
+                    TextButton(onClick = { bulkActions = !bulkActions }, enabled = filtered.isNotEmpty() || bulkActions) { Text(if (bulkActions) "完成" else "批量操作") }
+                }
+                if (filtersActive) TextButton(onClick = { protocolFilter = "全部协议"; sourceFilter = "全部来源"; enabledFilter = "全部"; regionFilter = "全部地区" }) { Text("清除筛选") }
+                if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
                     Box(Modifier.weight(1f)) {
                         OutlinedButton(onClick = { expandedProtocol = true }, modifier = Modifier.fillMaxWidth()) {
                             Text(protocolFilter, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -829,14 +849,13 @@ private fun NodesPage(
                     }
                     ChoiceMenu(regionFilter, regions, { regionFilter = it }, Modifier.weight(1f))
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
                     ChoiceMenu(sourceFilter, listOf("全部来源", "手动导入") + state.sources.map { it.name }, { sourceFilter = it }, Modifier.weight(1f))
                     DropdownMenuFilter(enabledFilter, { enabledFilter = it }, Modifier.weight(1f))
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("${filtered.size} 个结果", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), true) }, enabled = filtered.isNotEmpty()) { Text("全部启用") }
-                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), false) }, enabled = filtered.isNotEmpty()) { Text("全部停用") }
+                if (bulkActions) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), true); bulkActions = false }, enabled = filtered.isNotEmpty()) { Text("启用筛选结果") }
+                    TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), false); bulkActions = false }, enabled = filtered.isNotEmpty()) { Text("停用筛选结果") }
                 }
             }
         }
@@ -850,7 +869,7 @@ private fun NodesPage(
                 region = region,
                 onToggle = { viewModel.toggleNode(node.id) },
                 onRegionChange = { onRegionChange(node.id, it) },
-                onDelete = { viewModel.removeNode(node.id) },
+                onDelete = { nodeToDelete = node },
                 onEdit = { editingNode = node },
             )
         }
@@ -866,6 +885,10 @@ private fun NodesPage(
     editingNode?.let { node -> NodeEditDialog(node, onDismiss = { editingNode = null }, onSave = { name, type, server, port, options ->
         viewModel.updateNode(node.id, name, type, server, port, options); editingNode = null
     }) }
+    nodeToDelete?.let { node -> JichangAlertDialog(onDismissRequest = { nodeToDelete = null }, title = { Text("删除节点？") },
+        text = { Text("将从本机删除“${node.name}”。") },
+        confirmButton = { TextButton(onClick = { viewModel.removeNode(node.id); nodeToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { nodeToDelete = null }) { Text("取消") } }) }
 }
 
 @Composable
@@ -939,48 +962,72 @@ private fun NodeRow(
 }
 
 @Composable
+private fun RuleManagementEntry(title: String, detail: String, modifier: Modifier = Modifier, compact: Boolean = false, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = modifier.fillMaxWidth().heightIn(min = JichangSpacing.touchTarget), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else JichangSpacing.card, vertical = if (compact) 10.dp else 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (!compact) Text("进入", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+private fun currentRuleIssues(state: AppState): List<com.jzb.jichang.android.service.RuleIssue> =
+    RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet()) + state.ruleProviderStatuses
+        .filter { it.profileId == state.activeProfile.id && !it.error.isNullOrBlank() }
+        .mapNotNull { status -> state.ruleProfile.providers.firstOrNull { it.id == status.providerId }?.let { provider ->
+            com.jzb.jichang.android.service.RuleIssue(-1, RoutingRule("RULE-SET", provider.name, ""), "规则集刷新失败：${status.error}", providerId = provider.id)
+        } }
+
+@Composable
 private fun RulesPage(
     state: AppState,
     viewModel: AppViewModel,
+    section: RuleSection,
+    onSectionChange: (RuleSection) -> Unit,
     modifier: Modifier = Modifier,
     onEditGroup: (PolicyGroup) -> Unit,
-    onEditRule: (Int, com.jzb.jichang.android.model.RoutingRule) -> Unit,
+    onEditRule: (Int, RoutingRule) -> Unit,
     onAddRule: () -> Unit,
     onAddGroup: () -> Unit,
     onProviders: (String?) -> Unit,
     onSaveRuleProfile: (RuleProfile) -> Unit,
 ) {
-    val context = LocalContext.current
-    val workspacePrefs = remember(context) { context.getSharedPreferences("rules_ui", Context.MODE_PRIVATE) }
-    var workspace by remember(workspacePrefs) { mutableStateOf(workspacePrefs.getString("workspace", "basic") ?: "basic") }
-    var advancedSection by remember { mutableStateOf(0) }
-    var query by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("全部类型") }
-    var strategy by remember { mutableStateOf("全部策略") }
-    var selecting by remember { mutableStateOf(false) }
-    var selectedRules by remember { mutableStateOf(setOf<Int>()) }
+    var query by remember(state.activeProfile.id) { mutableStateOf("") }
+    var category by remember(state.activeProfile.id) { mutableStateOf("全部类型") }
+    var strategy by remember(state.activeProfile.id) { mutableStateOf("全部策略") }
+    var filtersExpanded by remember(state.activeProfile.id) { mutableStateOf(false) }
+    var selecting by remember(state.activeProfile.id) { mutableStateOf(false) }
+    var selectedRules by remember(state.activeProfile.id) { mutableStateOf(setOf<Int>()) }
     var deleting by remember { mutableStateOf(false) }
     var deletingIndex by remember { mutableStateOf<Int?>(null) }
     var groupToDelete by remember { mutableStateOf<PolicyGroup?>(null) }
     var showSimulator by remember { mutableStateOf(false) }
-    var basicEditing by remember { mutableStateOf<Pair<Int?, RoutingRule?>?>(null) }
+    var showTemplateRuleSetApply by remember { mutableStateOf(false) }
+    var addProviderMenu by remember { mutableStateOf(false) }
+    var providerFilter by remember(state.activeProfile.id) { mutableStateOf("全部来源") }
     var focusedProviderId by remember { mutableStateOf<String?>(null) }
     var focusedSubRuleName by remember { mutableStateOf<String?>(null) }
     var bulkTarget by remember { mutableStateOf("") }
-    var showTemplateRuleSetApply by remember { mutableStateOf(false) }
-    var ruleSetKind by remember { mutableStateOf(0) }
-    val issues = remember(state.ruleProfile, state.ruleProviderStatuses, state.activeProfile.id) {
-        RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet()) + state.ruleProviderStatuses
-            .filter { it.profileId == state.activeProfile.id && !it.error.isNullOrBlank() }
-            .mapNotNull { status -> state.ruleProfile.providers.firstOrNull { it.id == status.providerId }?.let { provider ->
-                com.jzb.jichang.android.service.RuleIssue(-1, RoutingRule("RULE-SET", provider.name, ""), "规则集刷新失败：${status.error}", providerId = provider.id)
-            } }
+    LaunchedEffect(section) {
+        if (section != RuleSection.List) { selecting = false; selectedRules = emptySet() }
     }
+    val issues = remember(state.ruleProfile, state.ruleProviderStatuses, state.nodes, state.activeProfile.id) { currentRuleIssues(state) }
+    val blockingIssues = issues.count { !it.warning }
+    val targetNames = (state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")).distinct()
     val categories = listOf("全部类型", "域名", "IP 与地理", "端口与网络", "进程", "规则集", "逻辑与兜底")
+    val filtered = query.isNotBlank() || category != "全部类型" || strategy != "全部策略"
     val lastMovableIndex = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type == "MATCH" }) 1 else 0
-    val targetNames = state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")
     val visibleRules = state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
-        val conditionText = buildString { fun appendCondition(condition: com.jzb.jichang.android.model.RuleCondition) { append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty()); condition.children.forEach(::appendCondition) }; rule.conditions.forEach(::appendCondition) }
+        val conditionText = buildString {
+            fun appendCondition(condition: RuleCondition) {
+                append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty())
+                condition.children.forEach(::appendCondition)
+            }
+            rule.conditions.forEach(::appendCondition)
+        }
         val matchesText = query.isBlank() || listOf(rule.type, rule.value, rule.group, rule.rawLine.orEmpty(), rule.extraParameters.joinToString(" "), conditionText).any { it.contains(query, true) }
         val matchesStrategy = strategy == "全部策略" || rule.group == strategy
         val matchesCategory = when (category) {
@@ -994,235 +1041,188 @@ private fun RulesPage(
         }
         matchesText && matchesStrategy && matchesCategory
     }
-    Column(modifier) {
-        SegmentedTabs(listOf("基础分流", "高级规则管理"), if (workspace == "basic") 0 else 1) { selected ->
-            workspace = if (selected == 0) "basic" else "advanced"
-            workspacePrefs.edit().putString("workspace", workspace).apply()
-            selecting = false
-            selectedRules = emptySet()
-        }
-        if (workspace == "basic") {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("常用分流", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("规则按列表顺序匹配；兜底规则固定在最后。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                OutlinedButton(onClick = { showSimulator = true }) { Text("规则模拟") }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("搜索规则") }, singleLine = true)
-                OutlinedButton(onClick = { basicEditing = null to null }) { Icon(Icons.Outlined.Add, null); Text("添加") }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                ChoiceMenu(category, listOf("全部类型", "域名", "IP 与地理", "规则集"), { category = it }, Modifier.weight(1f))
-                ChoiceMenu(strategy, listOf("全部策略") + targetNames, { strategy = it }, Modifier.weight(1f))
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Spacer(Modifier.weight(1f))
-                Text("${visibleRules.size} 条", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            val blockingIssues = issues.count { !it.warning }
-            if (issues.isNotEmpty()) Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = if (blockingIssues == 0) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
-                val color = if (blockingIssues == 0) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
-                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("$blockingIssues 个配置错误 · ${issues.size - blockingIssues} 个可能冲突", Modifier.weight(1f), color = color, style = MaterialTheme.typography.labelLarge)
-                    TextButton(onClick = { workspace = "advanced"; advancedSection = 4; workspacePrefs.edit().putString("workspace", workspace).apply() }) { Text("查看详情") }
-                }
-            }
-            if (state.ruleProfile.rules.isEmpty()) EmptyCard("还没有分流规则", "添加规则，或从规则集分区应用模板规则。")
-            else if (visibleRules.isEmpty()) Text("没有符合筛选条件的规则。", Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            else LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(visibleRules, key = { it.first }) { (index, rule) ->
-                    val isAdvancedRule = !isBasicWorkspaceRule(rule)
-                    BasicRuleCard(rule, index, index > 0 && rule.type != "MATCH", index < lastMovableIndex && rule.type != "MATCH", isAdvancedRule,
-                        onEdit = { if (isAdvancedRule) { workspace = "advanced"; advancedSection = 0; workspacePrefs.edit().putString("workspace", workspace).apply(); onEditRule(index, rule) } else basicEditing = index to rule }, onMoveUp = { viewModel.moveRule(index, -1) }, onMoveDown = { viewModel.moveRule(index, 1) },
-                        onDelete = { deletingIndex = index })
-                }
-            }
-        } else {
-            SegmentedTabs(listOf("完整规则", "策略组", "规则集", "子规则", "校验 ${issues.size}"), advancedSection) { advancedSection = it }
-            when (advancedSection) {
-                0 -> {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("搜索类型、内容、条件、策略与参数") }, singleLine = true)
-                        Spacer(Modifier.width(8.dp)); OutlinedButton(onClick = onAddRule) { Icon(Icons.Outlined.Add, null); Text("规则") }
+    when (section) {
+        RuleSection.List -> LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.item)) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("分流规则", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Text("按列表顺序匹配，MATCH 固定在最后。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (issues.isNotEmpty()) Card(onClick = { onSectionChange(RuleSection.Diagnostics) }, colors = CardDefaults.cardColors(containerColor = if (blockingIssues > 0) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.tertiaryContainer)) {
+                        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("$blockingIssues 个错误 · ${issues.size - blockingIssues} 个可能冲突", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                            Text("查看校验", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ChoiceMenu(category, categories, { category = it }, Modifier.weight(1f))
-                        ChoiceMenu(strategy, listOf("全部策略") + targetNames, { strategy = it }, Modifier.weight(1f))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(query, { query = it; selectedRules = emptySet() }, Modifier.weight(1f), label = { Text("搜索规则") }, singleLine = true)
+                        Button(onClick = onAddRule) { Icon(Icons.Outlined.Add, null); Text("规则") }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("按从上到下的顺序匹配", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { selecting = !selecting; selectedRules = emptySet() }) { Text(if (selecting) "取消选择" else "批量操作") }
-                        if (selecting) Text("已选 ${selectedRules.size}", style = MaterialTheme.typography.labelSmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${visibleRules.size} 条规则", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { filtersExpanded = !filtersExpanded }) { Text(if (filtersExpanded) "收起筛选" else "筛选") }
+                        TextButton(onClick = { showSimulator = true }) { Text("模拟") }
+                    }
+                    if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ChoiceMenu(category, categories, { category = it; selectedRules = emptySet() }, Modifier.weight(1f))
+                        ChoiceMenu(strategy, listOf("全部策略") + targetNames, { strategy = it; selectedRules = emptySet() }, Modifier.weight(1f))
+                    }
+                    if (filtered) Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("筛选期间暂停排序。", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { query = ""; category = "全部类型"; strategy = "全部策略"; selectedRules = emptySet() }) { Text("清除筛选") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("管理", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        TextButton(onClick = { selecting = !selecting; selectedRules = emptySet() }, enabled = state.ruleProfile.rules.any { it.type != "MATCH" } || selecting) { Text(if (selecting) "取消选择" else "批量操作") }
                     }
                     if (selecting && selectedRules.isNotEmpty()) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SelectField("批量更改目标", bulkTarget, targetNames) { bulkTarget = it }
+                        Text("已选 ${selectedRules.size} 条", style = MaterialTheme.typography.labelMedium)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) { SelectField("更改目标", bulkTarget, targetNames) { bulkTarget = it } }
                             TextButton(enabled = bulkTarget in targetNames, onClick = { viewModel.changeRuleTargets(selectedRules, bulkTarget); selectedRules = emptySet(); selecting = false }) { Text("应用") }
                             TextButton(onClick = { deleting = true }) { Text("删除", color = MaterialTheme.colorScheme.error) }
                         }
                     }
-                    if (state.ruleProfile.rules.isEmpty()) EmptyCard("还没有规则", "添加规则后，可在此使用完整类型和参数管理匹配顺序。")
-                    else LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(visibleRules, key = { it.first }) { (index, rule) -> RuleListCard(
-                            rule = rule, onEdit = { onEditRule(index, rule) }, onMoveUp = { viewModel.moveRule(index, -1) }, onMoveDown = { viewModel.moveRule(index, 1) },
-                            onDelete = { deletingIndex = index }, canMoveUp = index > 0 && rule.type != "MATCH", canMoveDown = index < lastMovableIndex && rule.type != "MATCH",
-                            selectable = selecting && !rule.type.equals("MATCH", true), checked = index in selectedRules,
-                            onCheckedChange = { checked -> selectedRules = if (checked) selectedRules + index else selectedRules - index },
-                            onDuplicate = { viewModel.duplicateRule(index) },
-                        ) }
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RuleManagementEntry("策略组", "${state.ruleProfile.groups.size} 个", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.Groups) }
+                        RuleManagementEntry("规则集", "${state.ruleProfile.providers.size} 个", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.Providers) }
                     }
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RuleManagementEntry("子规则", "${state.ruleProfile.subRules.size} 个", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.SubRules) }
+                        RuleManagementEntry("校验", if (issues.isEmpty()) "配置正常" else "${issues.size} 项提醒", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.Diagnostics) }
+                    }
+                    Text("规则列表", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
-                1 -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                    HeaderCard("策略组", "规则的出口目标。显示成员数和被规则引用数。")
-                    OutlinedButton(onClick = onAddGroup, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("新建策略组") }
-                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) { items(state.ruleProfile.groups, key = { it.name }) { group ->
-                        val references = state.ruleProfile.rules.count { it.group == group.name } + state.ruleProfile.subRules.sumOf { sub -> sub.rules.count { it.group == group.name } }
-                        val activeNodes = state.nodes.count { node -> (node.sourceId == null || node.sourceId in state.activeProfile.selectedSourceIds) && node.id in state.activeProfile.enabledNodeIds }
-                        val memberSummary = if (group.members.isEmpty() && !group.membersExplicit) "$activeNodes 个默认节点" else "${group.members.size} 个成员"
-                        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Hub, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
+            }
+            if (state.ruleProfile.rules.isEmpty()) item { EmptyCard("还没有分流规则", "添加规则，或从规则集页面应用模板规则。") }
+            else if (visibleRules.isEmpty()) item { EmptyCard("没有符合条件的规则", "清除搜索词或筛选条件后再试。") }
+            else items(visibleRules, key = { it.first }) { (index, rule) ->
+                RuleListCard(rule = rule, onEdit = { onEditRule(index, rule) }, onMoveUp = { viewModel.moveRule(index, -1) }, onMoveDown = { viewModel.moveRule(index, 1) },
+                    onDelete = { deletingIndex = index }, canMoveUp = !filtered && index > 0 && rule.type != "MATCH", canMoveDown = !filtered && index < lastMovableIndex && rule.type != "MATCH",
+                    selectable = selecting && !rule.type.equals("MATCH", true), checked = index in selectedRules,
+                    onCheckedChange = { checked -> selectedRules = if (checked) selectedRules + index else selectedRules - index },
+                    onDuplicate = { viewModel.duplicateRule(index) }, showReorder = !filtered && !selecting)
+            }
+        }
+        RuleSection.Groups -> Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("规则的出口目标", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = onAddGroup) { Icon(Icons.Outlined.Add, null); Text("策略组") }
+            }
+            if (state.ruleProfile.groups.isEmpty()) EmptyCard("没有策略组", "添加策略组，为规则设置出口目标。")
+            else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(state.ruleProfile.groups, key = { it.name }) { group ->
+                    val references = state.ruleProfile.rules.count { it.group == group.name } + state.ruleProfile.subRules.sumOf { sub -> sub.rules.count { it.group == group.name } }
+                    val activeNodes = state.nodes.count { node -> (node.sourceId == null || node.sourceId in state.activeProfile.selectedSourceIds) && node.id in state.activeProfile.enabledNodeIds }
+                    val memberSummary = if (group.members.isEmpty() && !group.membersExplicit) "$activeNodes 个默认节点" else "${group.members.size} 个成员"
+                    Card(onClick = { onEditGroup(group) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) { Text(group.name, style = MaterialTheme.typography.titleSmall); Text("${group.type} · $memberSummary · 被引用 $references 次", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            TextButton(onClick = { onEditGroup(group) }) { Text("编辑") }
                             IconButton(enabled = state.ruleProfile.groups.size > 1, onClick = { groupToDelete = group }) { Icon(Icons.Outlined.Delete, "删除策略组") }
-                        } }
-                    } }
-                }
-                2 -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                    SegmentedTabs(listOf("模板应用", "本机远程下载", "本机编写"), ruleSetKind) { ruleSetKind = it }
-                    when (ruleSetKind) {
-                        0 -> {
-                            HeaderCard("应用模板规则集", "从资源中已下载的配置模板挑选规则集，并导入相关 RULE-SET 路由规则。")
-                            OutlinedButton(onClick = { showTemplateRuleSetApply = true }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                                Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("浏览模板规则集")
-                            }
-                            if (state.templates.isEmpty()) EmptyCard("还没有配置模板", "先到“资源 → 模板”下载并保存 Mihomo YAML 模板。")
-                            else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(state.templates, key = { it.id }) { template ->
-                                    val parsed = remember(template.id, template.rawYaml) { runCatching { MihomoTemplateParser().parse(template.rawYaml) }.getOrNull() }
-                                    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                                        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            Column(Modifier.weight(1f)) {
-                                                Text(template.name, style = MaterialTheme.typography.titleSmall)
-                                                Text("${parsed?.ruleProfile?.providers?.size ?: 0} 个规则集 · ${parsed?.ruleProfile?.rules?.count { it.type == "RULE-SET" } ?: 0} 条规则集路由", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                            TextButton(onClick = { showTemplateRuleSetApply = true }) { Text("选择应用") }
-                                        }
-                                    }
-                                }
-                                item { HeaderCard("已应用到当前配置", "已从模板复制的规则集可在这里刷新、预览或编辑。") }
-                                items(state.ruleProfile.providers.filter { it.sourceTemplateId != null }, key = { it.id }) { provider ->
-                                    val status = state.ruleProviderStatuses.firstOrNull { it.profileId == state.activeProfile.id && it.providerId == provider.id }
-                                    val refreshing = provider.id in viewModel.refreshingRuleProviderIds
-                                    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (focusedProviderId == provider.id) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
-                                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Column(Modifier.weight(1f)) {
-                                                    Text(provider.name, style = MaterialTheme.typography.titleSmall)
-                                                    Text("${provider.sourceTemplateName.orEmpty()} · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                }
-                                                if (provider.type == "http") TextButton(enabled = !refreshing, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
-                                                TextButton(onClick = { viewModel.previewRuleProvider(state.activeProfile, provider, status) }) { Text("预览") }
-                                            }
-                                            Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}" } ?: "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        else -> {
-                            val localOnly = ruleSetKind == 2
-                            HeaderCard(if (localOnly) "本机编写" else "本机远程下载", if (localOnly) "以内嵌规则或应用规则目录中的本机文件保存。" else "规则内容可在本机刷新和预览；导出仍使用远程 URL。")
-                            OutlinedButton(onClick = { onProviders(if (localOnly) "inline" else "http") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                                Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text(if (localOnly) "编写规则集" else "添加远程规则集")
-                            }
-                            val providers = state.ruleProfile.providers.filter { provider ->
-                                provider.sourceTemplateId == null && if (localOnly) provider.type in setOf("inline", "file") else provider.type == "http"
-                            }
-                            if (providers.isEmpty()) EmptyCard(if (localOnly) "没有本机规则集" else "没有远程规则集", if (localOnly) "添加规则项并以内嵌方式导出。" else "添加 HTTP(S) 规则集地址后，可刷新并预览本机缓存。")
-                            else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) { items(providers, key = { it.id }) { provider ->
-                                val status = state.ruleProviderStatuses.firstOrNull { it.profileId == state.activeProfile.id && it.providerId == provider.id }
-                                val refreshing = provider.id in viewModel.refreshingRuleProviderIds
-                                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (focusedProviderId == provider.id) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) { Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Column(Modifier.weight(1f)) { Text(provider.name, style = MaterialTheme.typography.titleSmall); Text("${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                        if (provider.type == "http") TextButton(enabled = !refreshing, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
-                                        TextButton(onClick = { viewModel.previewRuleProvider(state.activeProfile, provider, status) }) { Text("预览") }
-                                        TextButton(onClick = { onProviders(if (localOnly) "inline" else "http") }) { Text("管理") }
-                                    }
-                                    Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))} · ${status.itemCount?.let { count -> "$count 项" } ?: "内容已缓存"}" } ?: if (provider.type == "inline") "内嵌内容 ${provider.payload.size} 项" else "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                                } }
-                            } }
                         }
                     }
                 }
-                3 -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                    HeaderCard("子规则", "子规则集合及其引用都属于当前配置。")
-                    OutlinedButton(onClick = { onProviders(null) }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text("管理子规则") }
-                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) { items(state.ruleProfile.subRules, key = { it.name }) { sub ->
-                        val references = state.ruleProfile.rules.count { it.type == "SUB-RULE" && it.value == sub.name }
-                        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (focusedSubRuleName == sub.name) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(14.dp)) { Text(sub.name, style = MaterialTheme.typography.titleSmall); Text("${sub.rules.size} 条规则 · 被引用 $references 次", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant); sub.rules.take(3).forEach { Text("${it.type} · ${it.value} → ${it.group}", style = MaterialTheme.typography.labelSmall) } } }
-                    } }
-                    if (state.ruleProfile.subRules.isEmpty()) EmptyCard("没有子规则", "从规则集管理中创建子规则集合。")
+            }
+        }
+        RuleSection.Providers -> Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("规则集来源", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Box {
+                    Button(onClick = { addProviderMenu = true }) { Icon(Icons.Outlined.Add, null); Text("规则集") }
+                    DropdownMenu(addProviderMenu, { addProviderMenu = false }) {
+                        DropdownMenuItem(text = { Text("从模板应用") }, onClick = { addProviderMenu = false; showTemplateRuleSetApply = true })
+                        DropdownMenuItem(text = { Text("添加远程规则集") }, onClick = { addProviderMenu = false; onProviders("http") })
+                        DropdownMenuItem(text = { Text("编写本机规则集") }, onClick = { addProviderMenu = false; onProviders("inline") })
+                    }
                 }
-                else -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                    HeaderCard("配置校验", "检查目标策略、资源引用、条件格式和兜底顺序。")
-                    if (issues.isEmpty()) EmptyCard("规则配置正常", "当前规则及其引用没有发现静态校验问题。")
-                    else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) { items(issues) { issue ->
-                        Card(onClick = {
-                            when {
-                                issue.index >= 0 && issue.index in state.ruleProfile.rules.indices -> onEditRule(issue.index, state.ruleProfile.rules[issue.index])
-                                issue.providerId != null -> { advancedSection = 2; focusedProviderId = issue.providerId }
-                                issue.subRuleName != null -> { advancedSection = 3; focusedSubRuleName = issue.subRuleName }
-                                issue.groupName != null -> { advancedSection = 1; state.ruleProfile.groups.firstOrNull { it.name == issue.groupName }?.let(onEditGroup) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { ChoiceMenu(providerFilter, listOf("全部来源", "来自模板", "远程", "本机"), { providerFilter = it }, Modifier.fillMaxWidth()) }
+                TextButton(onClick = { onProviders(null) }) { Text("管理") }
+            }
+            val providers = state.ruleProfile.providers.filter { provider -> when (providerFilter) {
+                "来自模板" -> provider.sourceTemplateId != null
+                "远程" -> provider.type == "http"
+                "本机" -> provider.type != "http"
+                else -> true
+            } }
+            if (providers.isEmpty()) EmptyCard("没有规则集", if (state.ruleProfile.providers.isEmpty()) "可从模板应用，或添加远程和本机规则集。" else "当前来源没有规则集。")
+            else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)) {
+                items(providers, key = { it.id }) { provider ->
+                    val status = state.ruleProviderStatuses.firstOrNull { it.profileId == state.activeProfile.id && it.providerId == provider.id }
+                    val refreshing = provider.id in viewModel.refreshingRuleProviderIds
+                    Card(colors = CardDefaults.cardColors(containerColor = if (focusedProviderId == provider.id) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(provider.name, style = MaterialTheme.typography.titleSmall)
+                            Text("${provider.sourceTemplateName ?: if (provider.type == "http") "远程" else "本机"} · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}" } ?: if (provider.type == "inline") "内嵌 ${provider.payload.size} 项" else "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row {
+                                if (provider.type == "http") TextButton(enabled = !refreshing, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
+                                TextButton(onClick = { viewModel.previewRuleProvider(state.activeProfile, provider, status) }) { Text("预览") }
+                                TextButton(onClick = { onProviders("edit:${provider.id}") }) { Text("编辑") }
                             }
-                        }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (issue.warning) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
-                            val issueColor = if (issue.warning) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
-                            Column(Modifier.padding(14.dp)) { Text("${if (issue.warning) "可能冲突 · " else ""}${if (issue.index >= 0) "第 ${issue.index + 1} 条 · ${issue.rule.type}" else issue.rule.type.ifBlank { "配置" }}", style = MaterialTheme.typography.labelLarge, color = issueColor); Text(issue.message, style = MaterialTheme.typography.bodySmall, color = issueColor) }
                         }
-                    } }
+                    }
+                }
+            }
+        }
+        RuleSection.SubRules -> Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("可在主规则中引用", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = { onProviders("subrules") }) { Text("管理子规则") }
+            }
+            if (state.ruleProfile.subRules.isEmpty()) EmptyCard("没有子规则", "添加子规则集合，在主规则中复用。")
+            else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(state.ruleProfile.subRules, key = { it.name }) { sub ->
+                    val references = state.ruleProfile.rules.count { it.type == "SUB-RULE" && it.value == sub.name }
+                    Card(onClick = { focusedSubRuleName = sub.name; onProviders("subrules") }, colors = CardDefaults.cardColors(containerColor = if (focusedSubRuleName == sub.name) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                            Text(sub.name, style = MaterialTheme.typography.titleSmall)
+                            Text("${sub.rules.size} 条规则 · 被引用 $references 次", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            sub.rules.take(2).forEach { Text("${it.type} · ${it.value} → ${it.group}", style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        }
+                    }
+                }
+            }
+        }
+        RuleSection.Diagnostics -> LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { Text("检查策略目标、规则集引用、条件格式和兜底顺序。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (issues.isEmpty()) item { EmptyCard("规则配置正常", "当前规则及其引用没有发现静态校验问题。") }
+            else items(issues) { issue ->
+                Card(onClick = {
+                    when {
+                        issue.index >= 0 && issue.index in state.ruleProfile.rules.indices -> onEditRule(issue.index, state.ruleProfile.rules[issue.index])
+                        issue.providerId != null -> { focusedProviderId = issue.providerId; onSectionChange(RuleSection.Providers) }
+                        issue.subRuleName != null -> { focusedSubRuleName = issue.subRuleName; onSectionChange(RuleSection.SubRules) }
+                        issue.groupName != null -> { onSectionChange(RuleSection.Groups); state.ruleProfile.groups.firstOrNull { it.name == issue.groupName }?.let(onEditGroup) }
+                    }
+                }, colors = CardDefaults.cardColors(containerColor = if (issue.warning) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text("${if (issue.warning) "可能冲突 · " else ""}${if (issue.index >= 0) "第 ${issue.index + 1} 条 · ${issue.rule.type}" else issue.rule.type.ifBlank { "配置" }}", style = MaterialTheme.typography.labelLarge)
+                        Text(issue.message, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }
     }
-    if (deleting) JichangAlertDialog(
-        onDismissRequest = { deleting = false },
-        title = { Text("删除所选规则？") },
+    if (deleting) JichangAlertDialog(onDismissRequest = { deleting = false }, title = { Text("删除所选规则？") },
         text = { Text("将从当前配置中删除 ${selectedRules.size} 条规则，此操作无法撤销。") },
         confirmButton = { TextButton(onClick = { viewModel.removeRules(selectedRules); selectedRules = emptySet(); selecting = false; deleting = false }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { deleting = false }) { Text("取消") } },
-    )
+        dismissButton = { TextButton(onClick = { deleting = false }) { Text("取消") } })
     deletingIndex?.let { index -> state.ruleProfile.rules.getOrNull(index)?.let { rule -> JichangAlertDialog(
-        onDismissRequest = { deletingIndex = null },
-        title = { Text("删除规则？") },
+        onDismissRequest = { deletingIndex = null }, title = { Text("删除规则？") },
         text = { Text("${rule.type} · ${ruleSummary(rule)} → ${rule.group}") },
         confirmButton = { TextButton(onClick = { viewModel.removeRule(index); deletingIndex = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { deletingIndex = null }) { Text("取消") } },
-    ) } }
-    groupToDelete?.let { group -> JichangAlertDialog(
-        onDismissRequest = { groupToDelete = null },
-        title = { Text("删除策略组？") },
+        dismissButton = { TextButton(onClick = { deletingIndex = null }) { Text("取消") } }) } }
+    groupToDelete?.let { group -> JichangAlertDialog(onDismissRequest = { groupToDelete = null }, title = { Text("删除策略组？") },
         text = { Text("主规则和子规则中指向“${group.name}”的目标都会改为其他现有策略组。") },
-        confirmButton = { TextButton(onClick = { viewModel.removeGroup(group.name); groupToDelete = null }) { Text("删除") } },
-        dismissButton = { TextButton(onClick = { groupToDelete = null }) { Text("取消") } },
-    ) }
+        confirmButton = { TextButton(onClick = { viewModel.removeGroup(group.name); groupToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { groupToDelete = null }) { Text("取消") } }) }
     if (showSimulator) RuleSimulationDialog(state.ruleProfile, onDismiss = { showSimulator = false })
-    if (showTemplateRuleSetApply) TemplateRuleSetApplyDialog(
-        templates = state.templates,
-        current = state.ruleProfile,
-        onDismiss = { showTemplateRuleSetApply = false },
-        onApply = { updated -> onSaveRuleProfile(updated); showTemplateRuleSetApply = false },
-    )
-    basicEditing?.let { edit -> BasicRuleDialog(state, edit, onDismiss = { basicEditing = null }, onSave = { index, rule -> if (index == null) viewModel.addRule(rule) else viewModel.updateRule(index, rule); basicEditing = null }) }
-    viewModel.ruleProviderPreview?.let { (name, content) ->
-        JichangAlertDialog(onDismissRequest = viewModel::dismissRuleProviderPreview, title = { Text("规则集预览：$name") }, text = {
-            Column(Modifier.heightIn(max = 540.dp).verticalScroll(rememberScrollState())) {
-                Text(content, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-            }
-        }, confirmButton = { TextButton(onClick = viewModel::dismissRuleProviderPreview) { Text("关闭") } })
-    }
+    if (showTemplateRuleSetApply) TemplateRuleSetApplyDialog(templates = state.templates, current = state.ruleProfile,
+        onDismiss = { showTemplateRuleSetApply = false }, onApply = { updated -> onSaveRuleProfile(updated); showTemplateRuleSetApply = false })
+    viewModel.ruleProviderPreview?.let { (name, content) -> JichangAlertDialog(onDismissRequest = viewModel::dismissRuleProviderPreview,
+        title = { Text("规则集预览：$name") }, text = { Column(Modifier.heightIn(max = 540.dp).verticalScroll(rememberScrollState())) { Text(content, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) } },
+        confirmButton = { TextButton(onClick = viewModel::dismissRuleProviderPreview) { Text("关闭") } }) }
 }
 
 @Composable
@@ -1261,10 +1261,27 @@ private fun TemplateRuleSetApplyDialog(
             val finalName = if (conflictActions[provider.id] == "改名导入项") renamed[provider.id]?.trim().orEmpty() else "$templateName · ${provider.name}"
             conflictActions[provider.id] != "替换现有" && current.providers.any { it.name.equals(finalName, true) }
         }
-    JichangAlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("应用模板规则集") },
-        text = { Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    FullScreenEditorDialog(
+        title = "应用模板规则集",
+        dirty = selected.isNotEmpty() || conflictActions.isNotEmpty() || renamed.isNotEmpty(),
+        valid = template != null && selected.isNotEmpty() && !unresolvedConflict && !duplicateName,
+        saveLabel = "应用",
+        onDismiss = onDismiss,
+        onSave = {
+            template?.let { selectedTemplate ->
+                val actions = selected.mapNotNull { id -> conflictActions[id]?.let { action ->
+                    id to when (action) {
+                        "保留现有" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.KEEP_EXISTING
+                        "替换现有" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.REPLACE
+                        "改名导入项" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.RENAME
+                        else -> null
+                    }
+                } }.mapNotNull { (id, action) -> action?.let { id to it } }.toMap()
+                runCatching { com.jzb.jichang.android.service.TemplateRuleSetImporter.apply(current, selectedTemplate, selected, actions, renamed) }
+                    .onSuccess(onApply).onFailure { importError = it.message ?: "模板规则集导入失败" }
+            }
+        },
+        content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (templates.isEmpty()) {
                 Text("资源中还没有已下载的配置模板。")
             } else {
@@ -1310,96 +1327,7 @@ private fun TemplateRuleSetApplyDialog(
                 importError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         } },
-        confirmButton = { TextButton(enabled = template != null && selected.isNotEmpty() && !unresolvedConflict && !duplicateName, onClick = {
-            val selectedTemplate = template ?: return@TextButton
-            val actions = selected.mapNotNull { id -> conflictActions[id]?.let { action ->
-                id to when (action) {
-                    "保留现有" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.KEEP_EXISTING
-                    "替换现有" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.REPLACE
-                    "改名导入项" -> com.jzb.jichang.android.service.TemplateProviderConflictAction.RENAME
-                    else -> null
-                }
-            } }.mapNotNull { (id, action) -> action?.let { id to it } }.toMap()
-            val result = runCatching {
-                com.jzb.jichang.android.service.TemplateRuleSetImporter.apply(current, selectedTemplate, selected, actions, renamed)
-            }
-            result.onSuccess(onApply).onFailure { importError = it.message ?: "模板规则集导入失败" }
-        }) { Text("应用") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
-}
-
-@Composable
-private fun BasicRuleCard(rule: RoutingRule, index: Int, canMoveUp: Boolean, canMoveDown: Boolean, isAdvanced: Boolean, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit) {
-    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Row(Modifier.padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("${index + 1}. ${basicRuleTitle(rule)}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                Text(basicRuleSummary(rule), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-                Text("目标：${rule.group}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (isAdvanced) TextButton(onClick = onEdit, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) { Text("在高级工作区查看 / 编辑", style = MaterialTheme.typography.labelSmall) }
-            }
-            Column {
-                IconButton(enabled = canMoveUp, onClick = onMoveUp) { Icon(Icons.Outlined.KeyboardArrowUp, "上移规则") }
-                IconButton(enabled = canMoveDown, onClick = onMoveDown) { Icon(Icons.Outlined.KeyboardArrowDown, "下移规则") }
-            }
-            Box {
-                var expanded by remember { mutableStateOf(false) }
-                IconButton(onClick = { expanded = true }) { Icon(Icons.Outlined.MoreVert, "规则操作") }
-                DropdownMenu(expanded, { expanded = false }) {
-                    DropdownMenuItem(text = { Text(if (isAdvanced) "在高级工作区编辑" else "编辑") }, onClick = { expanded = false; onEdit() })
-                    DropdownMenuItem(text = { Text("删除") }, onClick = { expanded = false; onDelete() })
-                }
-            }
-        }
-    }
-}
-
-private fun basicRuleTitle(rule: RoutingRule) = when (rule.type.uppercase()) {
-    "DOMAIN" -> "指定域名"; "DOMAIN-SUFFIX" -> "域名及子域名"; "DOMAIN-KEYWORD" -> "域名关键词"; "GEOSITE" -> "地理站点分类"
-    "IP-CIDR", "IP-CIDR6" -> "IP 网段"; "GEOIP" -> "国家/地区 IP"; "RULE-SET" -> "规则集"; "SUB-RULE" -> "子规则集合"; "MATCH" -> "最终兜底"
-    else -> rule.type
-}
-
-private fun basicRuleSummary(rule: RoutingRule) = when (rule.type.uppercase()) {
-    "RULE-SET" -> "使用规则集“${rule.value}”"; "SUB-RULE" -> "匹配子规则“${rule.value}”"; "MATCH" -> "其余未匹配流量"
-    else -> rule.value.ifBlank { "打开高级工作区查看匹配条件" }
-}
-
-private fun isBasicWorkspaceRule(rule: RoutingRule): Boolean =
-    rule.type.uppercase() in setOf("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE", "IP-CIDR", "IP-CIDR6", "GEOIP", "RULE-SET", "MATCH") &&
-        rule.conditions.isEmpty() && rule.rawLine.isNullOrBlank() && rule.extraParameters.isEmpty() && !rule.noResolve && !rule.source
-
-@Composable
-private fun BasicRuleDialog(state: AppState, editing: Pair<Int?, RoutingRule?>, onDismiss: () -> Unit, onSave: (Int?, RoutingRule) -> Unit) {
-    val index = editing.first
-    val initial = editing.second
-    var type by remember(index) { mutableStateOf(initial?.type ?: "DOMAIN-SUFFIX") }
-    var value by remember(index) { mutableStateOf(initial?.value.orEmpty()) }
-    var group by remember(index) { mutableStateOf(initial?.group ?: state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT") }
-    val options = listOf("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE", "IP-CIDR", "IP-CIDR6", "GEOIP", "RULE-SET", "MATCH")
-    val groupNames = state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")
-    val choices = if (type == "RULE-SET") state.ruleProfile.providers.map { it.name } else emptyList()
-    val valid = when (type) {
-        "MATCH" -> group in groupNames
-        "RULE-SET" -> value in choices && group in groupNames
-        else -> value.isNotBlank() && ',' !in value && '\n' !in value && '\r' !in value && group in groupNames
-    }
-    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text(if (index == null) "添加常用规则" else "编辑常用规则") }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            SelectField("匹配方式", type, options) { selected -> type = selected; if (selected == "RULE-SET") value = choices.firstOrNull().orEmpty() }
-            when (type) {
-                "RULE-SET" -> if (choices.isEmpty()) Text("先在高级规则管理中添加规则集。", color = MaterialTheme.colorScheme.error) else SelectField("规则集", value, choices) { value = it }
-                "MATCH" -> Text("匹配前面规则都未命中的流量。兜底规则由应用固定放在末尾。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else -> OutlinedTextField(value, { value = it }, Modifier.fillMaxWidth(), label = { Text(when (type) { "GEOSITE" -> "Geosite 分类"; "GEOIP" -> "国家/地区代码"; "IP-CIDR", "IP-CIDR6" -> "CIDR 网段"; else -> "匹配内容" }) }, singleLine = true)
-            }
-            SelectField("目标策略", group, groupNames) { group = it }
-            Text("更复杂的规则类型、组合条件和高级参数请进入高级规则管理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }, confirmButton = { TextButton(enabled = valid, onClick = {
-        val rule = (initial ?: RoutingRule(type, value, group)).copy(type = type, value = value.trim(), group = group)
-        onSave(index, rule)
-    }) { Text(if (index == null) "添加规则" else "保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
@@ -1446,11 +1374,11 @@ private fun RuleSimulationDialog(profile: com.jzb.jichang.android.model.RuleProf
 }
 
 @Composable
-private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean, selectable: Boolean, checked: Boolean, onCheckedChange: (Boolean) -> Unit, onDuplicate: () -> Unit) {
+private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean, selectable: Boolean, checked: Boolean, onCheckedChange: (Boolean) -> Unit, onDuplicate: () -> Unit, showReorder: Boolean = true) {
     var expanded by remember { mutableStateOf(false) }
     val dragThreshold = with(LocalDensity.current) { 64.dp.toPx() }
     var dragRemainder by remember(rule, selectable) { mutableStateOf(0f) }
-    Card(onClick = { if (!selectable) onEdit() }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    Card(onClick = { if (selectable) onCheckedChange(!checked) else onEdit() }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (selectable) Checkbox(checked = checked, onCheckedChange = onCheckedChange)
             Column(Modifier.weight(1f)) {
@@ -1459,7 +1387,7 @@ private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> 
                 val parameters = buildList { if (rule.noResolve) add("no-resolve"); if (rule.source) add("src"); addAll(rule.extraParameters) }
                 Text("策略  ${rule.group}${parameters.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · 参数 ", separator = ", ").orEmpty()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (!selectable && rule.type != "MATCH") Icon(Icons.Outlined.DragHandle, contentDescription = "长按拖动调整顺序", modifier = Modifier
+            if (showReorder && !selectable && rule.type != "MATCH") Icon(Icons.Outlined.DragHandle, contentDescription = "长按拖动调整顺序", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier
                 .size(40.dp)
                 .pointerInput(rule, canMoveUp, canMoveDown) {
                     detectDragGesturesAfterLongPress(
@@ -1473,14 +1401,14 @@ private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> 
                             while (dragRemainder <= -dragThreshold && canMoveUp) { onMoveUp(); dragRemainder += dragThreshold }
                         },
                     )
-                })
+                }.padding(8.dp))
             Box {
                 IconButton(onClick = { expanded = true }) { Icon(Icons.Outlined.MoreVert, "规则操作") }
                 DropdownMenu(expanded, { expanded = false }) {
                     DropdownMenuItem(text = { Text("编辑") }, onClick = { expanded = false; onEdit() })
                     DropdownMenuItem(enabled = rule.type != "MATCH", text = { Text("复制") }, onClick = { expanded = false; onDuplicate() })
-                    DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { expanded = false; onMoveUp() })
-                    DropdownMenuItem(text = { Text("下移") }, enabled = canMoveDown, onClick = { expanded = false; onMoveDown() })
+                    if (showReorder) DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { expanded = false; onMoveUp() })
+                    if (showReorder) DropdownMenuItem(text = { Text("下移") }, enabled = canMoveDown, onClick = { expanded = false; onMoveDown() })
                     DropdownMenuItem(text = { Text("删除") }, onClick = { expanded = false; onDelete() })
                 }
             }
@@ -1503,7 +1431,6 @@ private fun ExportPage(
     generatedNodes: Int,
     skippedNodes: Int,
     referencedSubscriptions: Int,
-    configText: String,
     filename: String,
     shareUrl: String?,
     shareError: String?,
@@ -1519,11 +1446,29 @@ private fun ExportPage(
     onShare: () -> Unit,
     onStopShare: () -> Unit,
     onShareLink: () -> Unit,
+    onOpenIssues: () -> Unit,
+    onPreview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profile = state.activeProfile
     val blockingRuleIssues = ruleIssues.filterNot { it.warning }
     Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
+        if (ruleIssues.isEmpty() && unresolvedTemplateProviders.isEmpty()) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Text("配置可导出", Modifier.padding(JichangSpacing.card), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+        if (ruleIssues.isNotEmpty()) Card(onClick = onOpenIssues, modifier = Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = if (blockingRuleIssues.isEmpty()) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
+            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("规则校验：${blockingRuleIssues.size} 个错误 · ${ruleIssues.size - blockingRuleIssues.size} 个提醒", style = MaterialTheme.typography.titleSmall)
+                    Text(if (blockingRuleIssues.isEmpty()) "可以继续导出，建议检查可能冲突。" else "请先修正规则错误后再导出。", style = MaterialTheme.typography.bodySmall)
+                }
+                Text("查看", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        if (unresolvedTemplateProviders.isNotEmpty()) Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Text("尚未绑定模板订阅：${unresolvedTemplateProviders.joinToString("、")}", Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+        }
+        shareUrl?.let { ActiveShareCard(it, onShareLink, onStopShare) }
         Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(profile.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -1532,14 +1477,6 @@ private fun ExportPage(
             }
         }
         Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        if (ruleIssues.isNotEmpty()) Card(colors = CardDefaults.cardColors(containerColor = if (blockingRuleIssues.isEmpty()) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                val color = if (blockingRuleIssues.isEmpty()) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
-                Text("规则校验：${blockingRuleIssues.size} 个错误 · ${ruleIssues.size - blockingRuleIssues.size} 个可能冲突", style = MaterialTheme.typography.titleSmall, color = color)
-                ruleIssues.forEach { issue -> Text("${if (issue.index >= 0) "#${issue.index + 1} ${issue.rule.type}" else issue.rule.type.ifBlank { "配置" }}：${issue.message}", style = MaterialTheme.typography.bodySmall, color = color) }
-                if (blockingRuleIssues.isNotEmpty()) Text("请返回规则页修正错误后再下载或分享；可能冲突仅供检查。", style = MaterialTheme.typography.bodySmall, color = color)
-            }
-        }
         Row(
             modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1577,18 +1514,14 @@ private fun ExportPage(
         if (!hasRegionalProxyGroups) OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
         } else Text("模板已包含地区筛选策略组，直接沿用模板分组。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (unresolvedTemplateProviders.isNotEmpty()) Text(
-            "尚未绑定：${unresolvedTemplateProviders.joinToString("、")}。请启用兼容订阅并完成绑定后再导出。",
-            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
-        )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text("下载配置", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
-            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
@@ -1598,28 +1531,32 @@ private fun ExportPage(
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
-        shareUrl?.let { url -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("局域网分享已开启", style = MaterialTheme.typography.titleSmall)
-                LanShareQrCodeCard(url)
-                SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
-                Text("接收设备需连接可互访的同一局域网。访客 Wi-Fi 或 VPN 可能阻断设备间连接。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onShareLink, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
-                    TextButton(onClick = onStopShare) { Text("停止") }
-                }
-            }
-        } }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("配置预览", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text("YAML", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-        }
-        Card(Modifier.fillMaxWidth().height(320.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            SelectionContainer {
-                Text(configText, Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-            }
-        }
+        OutlinedButton(onClick = onPreview, modifier = Modifier.fillMaxWidth()) { Text("预览生成的 YAML") }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun ActiveShareCard(url: String, onShareLink: () -> Unit, onStopShare: () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("局域网分享已开启", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                TextButton(onClick = onStopShare) { Text("停止分享") }
+            }
+            LanShareQrCodeCard(url)
+            SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
+            Text("接收设备需连接可互访的同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = onShareLink, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
+        }
+    }
+}
+
+@Composable
+private fun YamlPreviewPage(configText: String, modifier: Modifier = Modifier) {
+    SelectionContainer {
+        Text(configText, modifier.verticalScroll(rememberScrollState()).padding(JichangSpacing.pageHorizontal),
+            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -1717,6 +1654,7 @@ private fun TemplatesPage(
         }
         items(templates, key = { it.id }) { template ->
             val users = profiles.count { it.templateId == template.id }
+            var menuExpanded by remember(template.id) { mutableStateOf(false) }
             Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1726,16 +1664,17 @@ private fun TemplatesPage(
                             Text(template.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text("${template.fileName} · ${if (users == 0) "尚未使用" else "$users 个配置在使用"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, "模板操作") }
+                            DropdownMenu(menuExpanded, { menuExpanded = false }) {
+                                DropdownMenuItem(text = { Text("预览") }, onClick = { menuExpanded = false; onPreview(template) })
+                                DropdownMenuItem(text = { Text("导出") }, onClick = { menuExpanded = false; onExport(template) })
+                                DropdownMenuItem(text = { Text("重命名") }, onClick = { menuExpanded = false; onRename(template) })
+                                DropdownMenuItem(text = { Text("删除") }, onClick = { menuExpanded = false; onDelete(template) })
+                            }
+                        }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { onCreate(template) }, modifier = Modifier.weight(1f)) { Text("用作模板新建配置") }
-                        OutlinedButton(onClick = { onExport(template) }) { Text("导出") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { onRename(template) }) { Text("重命名") }
-                        TextButton(onClick = { onPreview(template) }) { Text("预览") }
-                        TextButton(onClick = { onDelete(template) }) { Text("删除", color = MaterialTheme.colorScheme.error) }
-                    }
+                    Button(onClick = { onCreate(template) }, modifier = Modifier.fillMaxWidth()) { Text("用模板新建配置") }
                 }
             }
         }
@@ -1940,10 +1879,15 @@ private fun GroupDialog(
     }
     var selectedRules by remember(initial?.name, state.ruleProfile.rules) { mutableStateOf(emptySet<Int>()) }
     var selectedProviders by remember(initial?.name, state.ruleProfile.providers) { mutableStateOf(emptySet<String>()) }
-    JichangAlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (initial == null) "新建策略组" else "编辑策略组") },
-        text = { Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val initialMembers = initial?.let { if (it.membersExplicit) it.members.toSet() else if (it.members.isEmpty()) nodeNames.keys else it.members.toSet() } ?: nodeNames.keys
+    FullScreenEditorDialog(
+        title = if (initial == null) "新建策略组" else "编辑策略组",
+        dirty = name != initial?.name.orEmpty() || type != (initial?.type ?: "select") || members != initialMembers.intersect(validMemberKeys) || selectedRules.isNotEmpty() || selectedProviders.isNotEmpty(),
+        valid = name.isNotBlank(),
+        saveLabel = if (initial == null) "添加" else "保存",
+        onDismiss = onDismiss,
+        onSave = { onSave(name, type, members.toList(), selectedRules, selectedProviders) },
+        content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
             Box {
                 OutlinedButton(onClick = { expanded = true }) { Text("类型：$type") }
@@ -2001,8 +1945,6 @@ private fun GroupDialog(
                 }
             }
         } },
-        confirmButton = { TextButton(onClick = { onSave(name, type, members.toList(), selectedRules, selectedProviders) }, enabled = name.isNotBlank()) { Text(if (initial == null) "添加" else "保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 
@@ -2033,33 +1975,35 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
     val valueRequired = type !in setOf("MATCH", "AND", "OR", "NOT")
     val minimumConditions = if (type == "NOT") 1 else 2
     val valid = (!valueRequired || value.isNotBlank()) && (!composite || conditions.size >= minimumConditions || rawLine.isNotBlank())
-    JichangAlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth(0.96f).widthIn(max = 620.dp),
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-        title = { Text(if (initial == null) "新建路由规则" else "编辑路由规则") },
-        text = { Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            SegmentedTabs(listOf("常用条件", "高级条件与参数"), editorSection) { editorSection = it }
-            if (editorSection == 0) {
+    val draftRule = RoutingRule(type, value, group, noResolve, source, conditions, extraParameters.lines().map(String::trim).filter(String::isNotBlank), rawLine.takeIf(String::isNotBlank))
+    val baseline = existing ?: RoutingRule("DOMAIN-SUFFIX", "", state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT")
+    FullScreenEditorDialog(
+        title = if (initial == null) "新建路由规则" else "编辑路由规则",
+        dirty = draftRule != baseline,
+        valid = valid,
+        saveLabel = if (initial == null) "添加" else "保存",
+        onDismiss = onDismiss,
+        onSave = { onSave(initial?.first, draftRule) },
+        content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("规则类型", style = MaterialTheme.typography.labelLarge)
                 OutlinedButton(onClick = { showTypePicker = true }, modifier = Modifier.fillMaxWidth()) { Text(if (type == "MATCH") "MATCH · 最终兜底" else type) }
                 when {
                     type == "MATCH" -> Text("MATCH 会被固定在规则列表末尾。", style = MaterialTheme.typography.bodySmall)
-                    composite -> Text("此规则包含组合条件，请切换到“高级条件与参数”编辑条件树。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    composite -> Text("此规则包含组合条件，请展开高级条件编辑条件树。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     type == "RULE-SET" -> {
                         SelectField("规则集", value, state.ruleProfile.providers.map { it.name }, { value = it })
-                        if (state.ruleProfile.providers.isEmpty()) Text("请先在高级规则管理的规则集页面添加提供者。", color = MaterialTheme.colorScheme.error)
+                        if (state.ruleProfile.providers.isEmpty()) Text("请先到规则集页面添加规则集。", color = MaterialTheme.colorScheme.error)
                     }
                     type == "SUB-RULE" -> {
                         SelectField("子规则", value, state.ruleProfile.subRules.map { it.name }, { value = it })
-                        if (state.ruleProfile.subRules.isEmpty()) Text("请先在高级规则管理的子规则页面添加子规则。", color = MaterialTheme.colorScheme.error)
+                        if (state.ruleProfile.subRules.isEmpty()) Text("请先到子规则页面添加子规则。", color = MaterialTheme.colorScheme.error)
                     }
                     type == "GEOSITE" -> {
                         val common = listOf("category-ads-all", "cn", "private", "google", "youtube", "apple", "microsoft", "telegram", "github", "geolocation-!cn")
                         OutlinedTextField(geositeSearch, { geositeSearch = it }, modifier = Modifier.fillMaxWidth(), label = { Text("搜索 GEOSITE 分类") }, singleLine = true)
                         OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text("匹配值") }, placeholder = { Text("可直接填写自定义分类") }, singleLine = true)
                         val suggestions = common.filter { geositeSearch.isBlank() || it.contains(geositeSearch, true) }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { suggestions.forEach { tag -> AssistChip(onClick = { value = tag }, label = { Text(tag) }) } }
+                        androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { items(suggestions) { tag -> AssistChip(onClick = { value = tag }, label = { Text(tag) }) } }
                     }
                     else -> OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), label = { Text(if (type.startsWith("PROCESS") || type == "UID") "进程 / 用户匹配" else "匹配内容") }, placeholder = { Text(rulePlaceholder(type)) }, singleLine = true)
                 }
@@ -2069,8 +2013,8 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
                         (state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")).distinct().forEach { item -> DropdownMenuItem(text = { Text(item) }, onClick = { group = item; strategyMenu = false }) }
                     }
                 }
-                if (composite) TextButton(onClick = { editorSection = 1 }) { Text("前往高级条件编辑") }
-            } else {
+            TextButton(onClick = { editorSection = if (editorSection == 0) 1 else 0 }) { Text(if (editorSection == 0) "显示高级条件与参数" else "收起高级条件与参数") }
+            if (editorSection == 1) {
                 if (composite) {
                     Text("条件 · ${if (type == "NOT") "只需 1 项" else "至少 2 项"}", style = MaterialTheme.typography.titleSmall)
                     conditions.forEachIndexed { index, condition ->
@@ -2087,8 +2031,6 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
                 if (!composite && !rawLine.isNullOrBlank()) OutlinedTextField(rawLine, { rawLine = it }, modifier = Modifier.fillMaxWidth(), label = { Text("原始导入规则（只读保留，可编辑）") }, minLines = 2)
             }
         } },
-        confirmButton = { TextButton(enabled = valid, onClick = { onSave(initial?.first, RoutingRule(type, value, group, noResolve, source, conditions, extraParameters.lines().map(String::trim).filter(String::isNotBlank), rawLine.takeIf(String::isNotBlank))) }) { Text(if (initial == null) "添加规则" else "保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
     if (showTypePicker) RuleTypePickerDialog(type, onDismiss = { showTypePicker = false }, onSelect = { selected ->
         val previous = type
@@ -2211,21 +2153,25 @@ private fun ConditionEditor(condition: RuleCondition, providerNames: List<String
 private fun RuleProvidersDialog(initial: RuleProfile, initialProviderType: String? = null, onDismiss: () -> Unit, onSave: (RuleProfile) -> Unit) {
     var profile by remember(initial) { mutableStateOf(initial) }
     val providers = profile.providers
-    var editing by remember { mutableStateOf<RuleProvider?>(null) }
+    var editing by remember(initialProviderType) { mutableStateOf<RuleProvider?>(when {
+        initialProviderType == "http" || initialProviderType == "inline" -> RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集", type = initialProviderType)
+        initialProviderType?.startsWith("edit:") == true -> initial.providers.firstOrNull { it.id == initialProviderType.removePrefix("edit:") }
+        else -> null
+    }) }
     var editingSubRule by remember { mutableStateOf<Pair<String, Int?>?>(null) }
     var subName by remember { mutableStateOf("") }
     var providerToDelete by remember { mutableStateOf<RuleProvider?>(null) }
     var subRuleToDelete by remember { mutableStateOf<String?>(null) }
-    var managementSection by remember { mutableStateOf(0) }
+    val managementSection = if (initialProviderType == "subrules") 1 else 0
     val invalidProviderSetup = profile.providers.any { it.name.isBlank() || (it.type == "http" && !it.url.startsWith("http")) || (it.type == "inline" && it.payload.isEmpty()) } ||
         profile.providers.map { it.name.lowercase() }.toSet().size != profile.providers.size ||
         profile.subRules.any { it.name.isBlank() } || profile.subRules.map { it.name.lowercase() }.toSet().size != profile.subRules.size
     if (editing != null) {
-        RuleProviderEditor(editing!!, onDismiss = { editing = null }, onSave = { item ->
+        RuleProviderEditor(editing!!, onDismiss = { if (initialProviderType == "http" || initialProviderType == "inline" || initialProviderType?.startsWith("edit:") == true) onDismiss() else editing = null }, onSave = { item ->
             val old = providers.indexOfFirst { it.id == editing?.id }
             val updated = if (old < 0) providers + item else providers.toMutableList().also { it[old] = item }
-            profile = profile.copy(providers = updated)
-            editing = null
+            if (initialProviderType == "http" || initialProviderType == "inline" || initialProviderType?.startsWith("edit:") == true) onSave(profile.copy(providers = updated))
+            else { profile = profile.copy(providers = updated); editing = null }
         })
     } else if (editingSubRule != null) {
         val (subNameKey, index) = editingSubRule!!
@@ -2237,13 +2183,13 @@ private fun RuleProvidersDialog(initial: RuleProfile, initialProviderType: Strin
             profile = profile.copy(subRules = profile.subRules.map { if (it.name == subNameKey) it.copy(rules = updatedRules) else it })
             editingSubRule = null
         })
-    } else JichangAlertDialog(onDismissRequest = onDismiss, title = { Text(if (managementSection == 0) "规则集管理" else "子规则管理") },
-        text = { Column(Modifier.height(440.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            SegmentedTabs(listOf("规则集 ${providers.size}", "子规则 ${profile.subRules.size}"), managementSection) { managementSection = it }
+    } else FullScreenEditorDialog(title = if (managementSection == 0) "规则集管理" else "子规则管理",
+        dirty = profile != initial, valid = !invalidProviderSetup, onDismiss = onDismiss, onSave = { onSave(profile) },
+        content = { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (managementSection == 0) {
                     providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { providerToDelete = provider }) { Icon(Icons.Outlined.Delete, "删除规则集提供者") } } } }
-                    OutlinedButton(onClick = { editing = RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集", type = initialProviderType ?: "http") }, modifier = Modifier.fillMaxWidth()) { Text(if (initialProviderType == "inline") "编写规则集" else "添加规则集提供者") }
+                    OutlinedButton(onClick = { editing = RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集", type = "http") }, modifier = Modifier.fillMaxWidth()) { Text("添加规则集") }
                     if (providers.isEmpty()) Text("远程、文件或内嵌规则集都在此配置。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     profile.subRules.forEach { rule ->
@@ -2261,8 +2207,7 @@ private fun RuleProvidersDialog(initial: RuleProfile, initialProviderType: Strin
                 }
                 if (invalidProviderSetup) Text("请检查提供者与子规则名称、HTTP 地址及内嵌内容。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
-        } },
-        confirmButton = { TextButton(enabled = !invalidProviderSetup, onClick = { onSave(profile) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+        } })
     providerToDelete?.let { provider ->
         val references = profile.rules.count { it.type == "RULE-SET" && it.value == provider.name } + profile.subRules.sumOf { sub -> sub.rules.count { it.type == "RULE-SET" && it.value == provider.name } }
         JichangAlertDialog(
@@ -2294,26 +2239,25 @@ private fun RuleProviderEditor(initial: RuleProvider, onDismiss: () -> Unit, onS
     var payload by remember(initial.id) { mutableStateOf(initial.payload.joinToString("\n")) }
     var headers by remember(initial.id) { mutableStateOf(initial.headers.entries.joinToString("\n") { (key, values) -> key + "=" + values.joinToString(",") }) }
     var section by remember(initial.id) { mutableStateOf(0) }
-    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("规则集提供者") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SegmentedTabs(listOf("基本信息", "高级参数"), section) { section = it }
-        if (section == 0) {
+    val parsedHeaders = headers.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].split(",").map(String::trim) } }.toMap()
+    val draft = initial.copy(name = name.trim(), type = type, behavior = behavior, url = url, path = path, format = format, interval = interval.toIntOrNull() ?: 86400, payload = payload.lines().filter(String::isNotBlank), headers = parsedHeaders)
+    FullScreenEditorDialog(title = "规则集", dirty = draft != initial, valid = name.isNotBlank() && (type != "http" || url.startsWith("http")) && (type != "inline" || payload.isNotBlank()),
+        onDismiss = onDismiss, onSave = { onSave(draft) }, content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = { section = if (section == 0) 1 else 0 }) { Text(if (section == 0) "显示高级参数" else "收起高级参数") }
             OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
             SelectField("来源类型", type, listOf("http", "file", "inline")) { type = it }
             SelectField("匹配行为", behavior, listOf("domain", "ipcidr", "classical")) { behavior = it }
             if (type == "http") OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("下载 URL") }, singleLine = true)
             if (type == "file") OutlinedTextField(path, { path = it }, modifier = Modifier.fillMaxWidth(), label = { Text("本地文件路径（应用规则集目录内）") }, singleLine = true)
             if (type == "inline") OutlinedTextField(payload, { payload = it }, modifier = Modifier.fillMaxWidth(), label = { Text("规则项，每行一条") }, minLines = 4)
-        } else {
+        if (section == 1) {
             SelectField("格式", format, listOf("yaml", "text", "mrs")) { format = it }
             if (type == "http") OutlinedTextField(interval, { interval = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("更新间隔（秒）") }, singleLine = true)
             if (type == "http") OutlinedTextField(path, { path = it }, modifier = Modifier.fillMaxWidth(), label = { Text("本地缓存路径") }, singleLine = true)
             if (type == "http") OutlinedTextField(headers, { headers = it }, modifier = Modifier.fillMaxWidth(), label = { Text("请求头，每行 key=value") }, minLines = 2)
             Text("这些参数会保存在当前规则集配置中；刷新缓存和状态仅保存在本机。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    } }, confirmButton = { TextButton(enabled = name.isNotBlank() && (type != "http" || url.startsWith("http")) && (type != "inline" || payload.isNotBlank()), onClick = {
-        val parsedHeaders = headers.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].split(",").map(String::trim) } }.toMap()
-        onSave(initial.copy(name = name.trim(), type = type, behavior = behavior, url = url, path = path, format = format, interval = interval.toIntOrNull() ?: 86400, payload = payload.lines().filter(String::isNotBlank), headers = parsedHeaders))
-    }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    } })
 }
 
 @Composable
