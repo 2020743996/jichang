@@ -1077,10 +1077,16 @@ private fun ExportPage(
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text("下载配置", maxLines = 1, softWrap = false)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
+                    Text("下载配置", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                }
             }
             OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
+                    Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
         if (shareUrl == null) {

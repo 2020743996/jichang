@@ -172,6 +172,11 @@ class LocalShareService : Service() {
                 }
 
                 override fun send(outputStream: OutputStream) {
+                    // NanoHTTPD also enables gzip automatically when the request advertises it.
+                    // This response already contains a pre-compressed body and its own header;
+                    // disable NanoHTTPD's second compression to avoid duplicate headers and
+                    // double-gzipped YAML (Dio rejects repeated Content-Encoding values).
+                    setGzipEncoding(false)
                     try {
                         super.send(outputStream)
                     } finally {
