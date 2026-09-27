@@ -166,7 +166,10 @@ class LocalShareService : Service() {
             return response.apply {
                 addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
                 addHeader("X-Content-Type-Options", "nosniff")
-                addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")
+                // Keep the suggested profile filename without forcing import clients to
+                // treat this response as a file attachment. The first LAN share version
+                // returned YAML inline, which works with clients that import URLs directly.
+                addHeader("Content-Disposition", "inline; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")
             }
         }
     }

@@ -60,6 +60,7 @@ class LocalShareController(context: Context) {
             check(bound) { "无法连接局域网分享服务" }
         }.onFailure { error ->
             pendingConfig = null
+            mutableUrl.value = null
             mutableError.value = error.message ?: "无法启动局域网分享"
             appContext.stopService(intent)
         }
@@ -79,7 +80,9 @@ class LocalShareController(context: Context) {
     fun updateConfig(config: String, filename: String) { service?.updateConfig(config, filename) }
 
     fun onResume() {
-        if (bound && service != null) mutableUrl.value = service?.currentUrl
+        if (bound && service != null) {
+            mutableUrl.value = service?.currentUrl
+        }
     }
 
     fun unbind() {
