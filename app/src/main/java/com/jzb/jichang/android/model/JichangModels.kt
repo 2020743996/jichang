@@ -98,6 +98,10 @@ data class ConfigProfile(
     val templateId: String? = null,
     /** Template proxy-provider name to an existing shared subscription source ID. */
     val templateProviderBindings: Map<String, String> = emptyMap(),
+    /** Mihomo fields managed by the visual settings form, isolated per profile. */
+    val mihomoSettings: Map<String, Any?> = emptyMap(),
+    /** null inherits template-only fields; a value replaces the advanced field set. */
+    val advancedYaml: String? = null,
 )
 
 data class ConfigTemplate(

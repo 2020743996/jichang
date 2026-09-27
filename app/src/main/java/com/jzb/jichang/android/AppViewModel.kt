@@ -146,6 +146,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun changeRuleTargets(indices: Set<Int>, target: String) = run { repository.changeRuleTargets(indices, target); "已将 ${indices.size} 条规则的目标改为 $target" }
     fun duplicateRule(index: Int) = run { repository.duplicateRule(index); "规则已复制" }
     fun saveRuleProfile(profile: RuleProfile) = run { repository.saveRuleProfile(profile); "规则集配置已保存" }
+    fun saveMihomoSettings(settings: Map<String, Any?>) = run { repository.saveMihomoSettings(settings); "Mihomo 设置已保存" }
+    fun saveAdvancedYaml(yaml: String) = run { repository.saveAdvancedYaml(yaml); "高级字段已保存" }
     fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = run { repository.updateExportSettings(sourceMode, enabledRegions, regionOverrides); null }
     fun bindTemplateProvider(name: String, sourceId: String?) = run { repository.setTemplateProviderBinding(name, sourceId); "模板订阅绑定已更新" }
 

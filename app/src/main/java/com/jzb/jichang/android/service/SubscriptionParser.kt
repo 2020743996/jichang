@@ -76,7 +76,7 @@ class SubscriptionParser {
     private fun parseUri(line: String, sourceId: String?): ProxyNode? {
         if (line.startsWith("vmess://", true)) return parseVmess(line, sourceId)
         if (line.startsWith("ss://", true)) return parseShadowsocks(line, sourceId)
-        if (line.startsWith("ssr://", true)) return null
+        if (line.startsWith("ssr://", true)) return parseShadowsocksR(line, sourceId)
         val uri = URI(line)
         val type = uri.scheme?.lowercase() ?: return null
         if (type !in setOf("vless", "trojan", "hysteria", "hysteria2", "hy2", "tuic", "anytls", "socks", "socks5", "http")) return null
@@ -148,6 +148,25 @@ class SubscriptionParser {
             "type" to "ss", "name" to name, "server" to hostPort.first, "port" to hostPort.second,
             "cipher" to decodedFields[0], "password" to decodedFields[1]
         )
+        return createNode(fields, sourceId)
+    }
+
+    private fun parseShadowsocksR(line: String, sourceId: String?): ProxyNode? {
+        val decoded = decodeBase64(line.substringAfter("ssr://", "")) ?: return null
+        val serverInfo = decoded.substringBefore("/?")
+        val parts = serverInfo.split(':', limit = 6)
+        if (parts.size != 6) return null
+        val server = parts[0].removeSurrounding("[", "]").takeIf(String::isNotBlank) ?: return null
+        val port = parts[1].toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+        val password = decodeBase64(parts[5]) ?: return null
+        val query = parseQuery(decoded.substringAfter("/?", ""))
+        val name = query["remarks"]?.let(::decodeBase64)?.takeIf(String::isNotBlank) ?: "SSR $server:$port"
+        val fields = linkedMapOf<String, Any?>(
+            "type" to "ssr", "name" to name, "server" to server, "port" to port,
+            "cipher" to parts[3], "password" to password, "protocol" to parts[2], "obfs" to parts[4],
+        )
+        query["obfsparam"]?.let(::decodeBase64)?.let { fields["obfs-param"] = it }
+        query["protoparam"]?.let(::decodeBase64)?.let { fields["protocol-param"] = it }
         return createNode(fields, sourceId)
     }
 

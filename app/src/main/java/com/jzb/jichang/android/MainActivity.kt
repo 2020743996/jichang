@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -56,6 +57,7 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
@@ -161,6 +163,8 @@ import com.jzb.jichang.android.service.NodeAutoGroups
 import com.jzb.jichang.android.service.RuleDiagnostics
 import com.jzb.jichang.android.service.RemoteConfigDownloader
 import com.jzb.jichang.android.service.LanShareQrCode
+import com.jzb.jichang.android.service.MihomoSettings
+import com.jzb.jichang.android.service.MihomoNodeOptionsYaml
 import com.jzb.jichang.android.share.LocalShareController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -178,7 +182,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppPage(val label: String) { Home("概览"), Resources("资源"), Rules("规则"), Share("分享") }
 private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("节点"), Templates("模板") }
-private enum class RuleSection(val label: String) { List("规则"), Groups("策略组"), Providers("规则集"), SubRules("子规则"), Diagnostics("校验") }
+private enum class RuleSection(val label: String) { List("规则"), Groups("策略组"), Providers("规则集"), SubRules("子规则"), Diagnostics("校验"), General("基础配置"), Advanced("高级 YAML") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
 
@@ -337,6 +341,16 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val generated = remember(state, profile, exportOptions) { generator.generate(state, profile, exportOptions) }
     val configText = generated.yaml
     val filename = remember(profile.fileName) { safeYamlFileName(profile.fileName) }
+    val effectiveVisualSettings = remember(profile, parsedTemplate) {
+        MihomoSettings.effectiveVisualSettings(parsedTemplate?.rawRoot.orEmpty(), profile)
+    }
+    val sensitiveReasons = buildList {
+        if (generated.referencedSubscriptions > 0) add("机场订阅地址")
+        if (!effectiveVisualSettings["external-controller"].toString().isNullOrBlank() && effectiveVisualSettings["external-controller"] != null) add("外部控制器地址")
+        if (!effectiveVisualSettings["secret"].toString().isNullOrBlank() && effectiveVisualSettings["secret"] != null) add("控制器密钥")
+        val authentication = effectiveVisualSettings["authentication"] as? List<*>
+        if (!authentication.isNullOrEmpty()) add("监听账号密码")
+    }
     var templateExportContent by remember { mutableStateOf<String?>(null) }
 
     val saveLegacyConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
@@ -404,7 +418,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     fun requestExport(action: ExportAction) {
         if (generated.unresolvedTemplateProviders.isNotEmpty()) {
             viewModel.run { throw IllegalStateException("请先为模板订阅绑定机场：${generated.unresolvedTemplateProviders.joinToString("、")}") }
-        } else if (generated.referencedSubscriptions > 0) pendingSensitiveAction = action
+        } else if (sensitiveReasons.isNotEmpty()) pendingSensitiveAction = action
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
     }
 
@@ -551,12 +565,15 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     }
                     AppPage.Rules -> key(profile.id) { RulesPage(
                         state, viewModel, section = ruleSection, onSectionChange = { ruleSection = it }, modifier = Modifier.fillMaxSize(),
+                        templateRoot = parsedTemplate?.rawRoot.orEmpty(),
                         onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
                         onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
                         onAddRule = { editingRule = null; dialog = DialogKind.Rule },
                         onAddGroup = { editingGroup = null; dialog = DialogKind.Group },
                         onProviders = { type -> providerInitialType = type; dialog = DialogKind.Providers },
                         onSaveRuleProfile = viewModel::saveRuleProfile,
+                        onSaveMihomoSettings = viewModel::saveMihomoSettings,
+                        onSaveAdvancedYaml = viewModel::saveAdvancedYaml,
                     ) }
                     AppPage.Share -> if (showYamlPreview) YamlPreviewPage(configText, Modifier.fillMaxSize()) else ExportPage(
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
@@ -641,8 +658,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     pendingSensitiveAction?.let { action ->
         JichangAlertDialog(
             onDismissRequest = { pendingSensitiveAction = null },
-            title = { Text("配置包含机场订阅凭据") },
-            text = { Text("引用模式会把已启用订阅地址写进 YAML。拿到文件或局域网分享链接的人可以使用这些订阅。请只分享给可信对象。") },
+            title = { Text("配置包含敏感信息") },
+            text = { Text("导出内容包含${sensitiveReasons.joinToString("、")}。拿到配置文件或局域网分享链接的人可能访问这些服务，请只分享给可信对象。") },
             confirmButton = { TextButton(onClick = {
                 pendingSensitiveAction = null
                 if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
@@ -984,6 +1001,217 @@ private fun currentRuleIssues(state: AppState): List<com.jzb.jichang.android.ser
         } }
 
 @Composable
+private fun MihomoSettingsPage(
+    profile: ConfigProfile,
+    templateRoot: Map<String, Any?>,
+    onSave: (Map<String, Any?>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val base = remember(profile.id, profile.mihomoSettings, templateRoot) {
+        MihomoSettings.effectiveVisualSettings(templateRoot, profile)
+    }
+    var values by remember(profile.id, profile.mihomoSettings, templateRoot) { mutableStateOf(base) }
+    var error by remember(profile.id) { mutableStateOf<String?>(null) }
+    val changed = values != base
+
+    fun setRoot(key: String, value: Any?) {
+        values = LinkedHashMap(values).apply { if (value == null) remove(key) else put(key, value) }
+    }
+    fun block(key: String): Map<String, Any?> = (values[key] as? Map<*, *>)
+        ?.entries?.associate { it.key.toString() to it.value }.orEmpty()
+    fun setBlock(key: String, field: String, value: Any?) {
+        val updated = LinkedHashMap(block(key)).apply {
+            if (value == null || (value is String && value.isBlank())) remove(field) else put(field, value)
+        }
+        setRoot(key, updated)
+    }
+    fun value(key: String, fallback: String = ""): String = values[key]?.toString() ?: fallback
+    fun blockValue(blockKey: String, field: String, fallback: String = ""): String = block(blockKey)[field]?.toString() ?: fallback
+    fun linesValue(blockKey: String, field: String, fallback: String = ""): String = when (val raw = block(blockKey)[field]) {
+        is List<*> -> raw.joinToString("\n")
+        null -> fallback
+        else -> raw.toString()
+    }
+    fun checked(blockKey: String, field: String, fallback: Boolean = false): Boolean =
+        (block(blockKey)[field] as? Boolean) ?: fallback
+
+    Column(modifier.fillMaxSize()) {
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Mihomo 基础配置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("设置只写入当前配置文件。未填写的选项沿用模板值或 Mihomo 默认行为。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SettingsPanel("常规与监听") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsTextField("mixed-port", value("mixed-port", "7890"), { setRoot("mixed-port", it) }, Modifier.weight(1f), "HTTP 与 SOCKS 混合端口")
+                    SettingsTextField("port", value("port"), { setRoot("port", it) }, Modifier.weight(1f), "HTTP 代理端口")
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsTextField("socks-port", value("socks-port"), { setRoot("socks-port", it) }, Modifier.weight(1f), "SOCKS5 端口")
+                    SettingsTextField("redir-port", value("redir-port"), { setRoot("redir-port", it) }, Modifier.weight(1f), "透明代理端口")
+                }
+                SettingsTextField("tproxy-port", value("tproxy-port"), { setRoot("tproxy-port", it) }, Modifier.fillMaxWidth(), "Linux TProxy 端口；Android App 不会启动内核")
+                SettingsSwitchRow("允许局域网连接", "开放监听后，同一网络的设备可能访问代理端口。", values["allow-lan"] as? Boolean ?: false) { setRoot("allow-lan", it) }
+                SettingsTextField("bind-address", value("bind-address", "*"), { setRoot("bind-address", it) }, Modifier.fillMaxWidth(), "监听地址，例如 * 或 127.0.0.1")
+                SelectField("工作模式", value("mode", "rule"), listOf("rule", "global", "direct")) { setRoot("mode", it) }
+                SelectField("日志等级", value("log-level", "info"), listOf("silent", "error", "warning", "info", "debug")) { setRoot("log-level", it) }
+                SelectField("进程匹配模式", value("process-mode", "strict"), listOf("strict", "always", "off")) { setRoot("process-mode", it) }
+                SettingsSwitchRow("IPv6", "控制 Mihomo 对 IPv6 流量的处理。", values["ipv6"] as? Boolean ?: true) { setRoot("ipv6", it) }
+                SettingsSwitchRow("统一延迟", "比较策略组节点时统一延迟计算方式。", values["unified-delay"] as? Boolean ?: false) { setRoot("unified-delay", it) }
+                SettingsSwitchRow("TCP 并发连接", "启用并发连接尝试。", values["tcp-concurrent"] as? Boolean ?: false) { setRoot("tcp-concurrent", it) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsTextField("保活空闲时长", value("keep-alive-idle"), { setRoot("keep-alive-idle", it) }, Modifier.weight(1f), "秒，可留空")
+                    SettingsTextField("保活间隔", value("keep-alive-interval"), { setRoot("keep-alive-interval", it) }, Modifier.weight(1f), "秒，可留空")
+                }
+                SettingsTextField("出口网卡", value("interface-name"), { setRoot("interface-name", it) }, Modifier.fillMaxWidth(), "例如 wlan0，可留空")
+                SettingsTextField("路由标记", value("routing-mark"), { setRoot("routing-mark", it) }, Modifier.fillMaxWidth(), "Linux fwmark，可留空")
+                SettingsTextField("全局 TLS 指纹", value("global-client-fingerprint"), { setRoot("global-client-fingerprint", it) }, Modifier.fillMaxWidth(), "例如 chrome，可留空")
+                SettingsTextField("外部控制器", value("external-controller"), { setRoot("external-controller", it) }, Modifier.fillMaxWidth(), "例如 127.0.0.1:9090；请谨慎分享")
+                SettingsTextField("控制器 UI 目录", value("external-ui"), { setRoot("external-ui", it) }, Modifier.fillMaxWidth(), "UI 静态文件目录，可留空")
+                SettingsTextField("控制器 UI 下载地址", value("external-ui-url"), { setRoot("external-ui-url", it) }, Modifier.fillMaxWidth(), "UI 下载 URL，可留空")
+                SettingsTextField("控制器密钥", value("secret"), { setRoot("secret", it) }, Modifier.fillMaxWidth(), "限制外部控制器访问")
+                OutlinedTextField(
+                    value = when (val auth = values["authentication"]) { is List<*> -> auth.joinToString("\n"); null -> ""; else -> auth.toString() },
+                    onValueChange = { setRoot("authentication", it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("监听认证") },
+                    supportingText = { Text("每行 username:password；没有认证时留空。") },
+                    minLines = 2,
+                )
+            }
+            SettingsPanel("DNS") {
+                SettingsSwitchRow("启用 DNS 模块", "开启后将输出 dns 配置。", checked("dns", "enable")) { setBlock("dns", "enable", it) }
+                SettingsTextField("DNS 监听地址", blockValue("dns", "listen", "127.0.0.1:1053"), { setBlock("dns", "listen", it) }, Modifier.fillMaxWidth(), "例如 0.0.0.0:1053")
+                SelectField("增强模式", blockValue("dns", "enhanced-mode", "redir-host"), listOf("fake-ip", "redir-host")) { setBlock("dns", "enhanced-mode", it) }
+                SettingsTextField("Fake-IP 地址段", blockValue("dns", "fake-ip-range", "198.18.0.1/16"), { setBlock("dns", "fake-ip-range", it) }, Modifier.fillMaxWidth())
+                SettingsSwitchRow("DNS IPv6", "允许 DNS 返回 IPv6 地址。", checked("dns", "ipv6", true)) { setBlock("dns", "ipv6", it) }
+                SettingsSwitchRow("使用配置 hosts", "响应 Mihomo 配置中的 hosts 记录。", checked("dns", "use-hosts", true)) { setBlock("dns", "use-hosts", it) }
+                SettingsSwitchRow("使用系统 hosts", "将系统 hosts 记录纳入解析。", checked("dns", "use-system-hosts", true)) { setBlock("dns", "use-system-hosts", it) }
+                SettingsSwitchRow("遵循路由规则", "DNS 连接遵循规则；启用时应配置代理节点解析 DNS。", checked("dns", "respect-rules")) { setBlock("dns", "respect-rules", it) }
+                SettingsTextField("默认 DNS", linesValue("dns", "default-nameserver"), { setBlock("dns", "default-nameserver", it) }, Modifier.fillMaxWidth(), "每行一个地址")
+                SettingsTextField("上游 DNS", linesValue("dns", "nameserver"), { setBlock("dns", "nameserver", it) }, Modifier.fillMaxWidth(), "每行一个地址")
+                SettingsTextField("Fallback DNS", linesValue("dns", "fallback"), { setBlock("dns", "fallback", it) }, Modifier.fillMaxWidth(), "每行一个地址，可留空")
+                SettingsTextField("代理节点解析 DNS", linesValue("dns", "proxy-server-nameserver"), { setBlock("dns", "proxy-server-nameserver", it) }, Modifier.fillMaxWidth(), "每行一个地址，可留空")
+            }
+            SettingsPanel("TUN") {
+                SettingsSwitchRow("启用 TUN", "只生成 Mihomo 配置；鸡场不会启动 VPN 或代理内核。", checked("tun", "enable")) { setBlock("tun", "enable", it) }
+                SelectField("协议栈", blockValue("tun", "stack", "mixed"), listOf("system", "gvisor", "mixed")) { setBlock("tun", "stack", it) }
+                SettingsSwitchRow("自动路由", "由 Mihomo 接管匹配流量的路由。", checked("tun", "auto-route", true)) { setBlock("tun", "auto-route", it) }
+                SettingsSwitchRow("自动检测网卡", "自动选择出口网卡。", checked("tun", "auto-detect-interface", true)) { setBlock("tun", "auto-detect-interface", it) }
+                SettingsSwitchRow("严格路由", "减少非预期流量绕过 TUN。", checked("tun", "strict-route")) { setBlock("tun", "strict-route", it) }
+                SettingsTextField("DNS 劫持", linesValue("tun", "dns-hijack", "any:53\ntcp://any:53"), { setBlock("tun", "dns-hijack", it) }, Modifier.fillMaxWidth(), "每行一个目标")
+                SettingsTextField("MTU", blockValue("tun", "mtu"), { setBlock("tun", "mtu", it) }, Modifier.fillMaxWidth(), "可留空使用内核默认值")
+            }
+            SettingsPanel("流量嗅探") {
+                SettingsSwitchRow("启用嗅探", "识别部分连接的目标域名。", checked("sniffer", "enable")) { setBlock("sniffer", "enable", it) }
+                SettingsSwitchRow("强制 DNS 映射", "将嗅探结果关联到 DNS 映射。", checked("sniffer", "force-dns-mapping")) { setBlock("sniffer", "force-dns-mapping", it) }
+                SettingsSwitchRow("解析纯 IP", "对纯 IP 目标也尝试解析域名。", checked("sniffer", "parse-pure-ip")) { setBlock("sniffer", "parse-pure-ip", it) }
+                SettingsSwitchRow("覆盖目标地址", "用嗅探到的域名覆盖连接目标。", checked("sniffer", "override-destination")) { setBlock("sniffer", "override-destination", it) }
+            }
+            SettingsPanel("时间同步") {
+                SettingsSwitchRow("启用 NTP", "生成可选的 Mihomo 时间同步配置。", checked("ntp", "enable")) { setBlock("ntp", "enable", it) }
+                SettingsTextField("NTP 服务器", blockValue("ntp", "server", "time.apple.com"), { setBlock("ntp", "server", it) }, Modifier.fillMaxWidth(), "默认 time.apple.com")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsTextField("端口", blockValue("ntp", "port", "123"), { setBlock("ntp", "port", it) }, Modifier.weight(1f))
+                    SettingsTextField("同步间隔（分钟）", blockValue("ntp", "interval", "30"), { setBlock("ntp", "interval", it) }, Modifier.weight(1f))
+                }
+                SettingsSwitchRow("写入系统时间", "需要 Mihomo 运行环境具备相应权限。", checked("ntp", "write-to-system")) { setBlock("ntp", "write-to-system", it) }
+            }
+            if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = JichangSpacing.pageHorizontal, vertical = 8.dp), horizontalArrangement = Arrangement.End) {
+            Button(enabled = changed, onClick = {
+                runCatching { MihomoSettings.normalizeVisualSettings(values) }
+                    .onSuccess { normalized -> error = null; onSave(normalized) }
+                    .onFailure { error = it.message ?: "配置值无效" }
+            }) { Text("保存基础配置") }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedYamlPage(
+    profile: ConfigProfile,
+    templateRoot: Map<String, Any?>,
+    onSave: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val initial = remember(profile.id, profile.advancedYaml, templateRoot) {
+        profile.advancedYaml ?: MihomoSettings.dumpAdvancedFields(templateRoot)
+    }
+    var yaml by remember(profile.id, initial) { mutableStateOf(initial) }
+    var error by remember(profile.id) { mutableStateOf<String?>(null) }
+    var validation by remember(profile.id) { mutableStateOf<String?>(null) }
+    Column(modifier.fillMaxSize().padding(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("高级 YAML", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+        Text("仅编辑表单未管理的 Mihomo 字段。代理、策略组、规则、规则集和可视化设置字段不能在这里覆盖；DNS、TUN 等区块中未由表单展示的字段仍可编辑。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = yaml,
+            onValueChange = { yaml = it; error = null; validation = null },
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            label = { Text("高级字段 YAML") },
+            placeholder = { Text("例如：\nprofile:\n  store-selected: true") },
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            minLines = 12,
+        )
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        validation?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+            OutlinedButton(onClick = {
+                runCatching { MihomoSettings.validateAdvancedYaml(yaml) }
+                    .onSuccess { error = null; validation = "YAML 有效 · ${it.size} 个顶层字段" }
+                    .onFailure { error = it.message ?: "高级 YAML 无效"; validation = null }
+            }) { Text("校验") }
+            Button(onClick = {
+                runCatching { MihomoSettings.validateAdvancedYaml(yaml) }
+                    .onSuccess { error = null; validation = null; onSave(yaml) }
+                    .onFailure { error = it.message ?: "高级 YAML 无效" }
+            }) { Text("保存高级字段") }
+        }
+    }
+}
+
+@Composable
+private fun SettingsPanel(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(title: String, summary: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(summary, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun SettingsTextField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    supportingText: String? = null,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        label = { Text(label) },
+        supportingText = supportingText?.let { { Text(it) } },
+        singleLine = true,
+    )
+}
+
+@Composable
 private fun RulesPage(
     state: AppState,
     viewModel: AppViewModel,
@@ -996,6 +1224,9 @@ private fun RulesPage(
     onAddGroup: () -> Unit,
     onProviders: (String?) -> Unit,
     onSaveRuleProfile: (RuleProfile) -> Unit,
+    templateRoot: Map<String, Any?>,
+    onSaveMihomoSettings: (Map<String, Any?>) -> Unit,
+    onSaveAdvancedYaml: (String) -> Unit,
 ) {
     var query by remember(state.activeProfile.id) { mutableStateOf("") }
     var category by remember(state.activeProfile.id) { mutableStateOf("全部类型") }
@@ -1091,6 +1322,10 @@ private fun RulesPage(
                     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RuleManagementEntry("子规则", "${state.ruleProfile.subRules.size} 个", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.SubRules) }
                         RuleManagementEntry("校验", if (issues.isEmpty()) "配置正常" else "${issues.size} 项提醒", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.Diagnostics) }
+                    }
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RuleManagementEntry("基础配置", "通用 · DNS · TUN · 嗅探 · NTP", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.General) }
+                        RuleManagementEntry("高级 YAML", "模板未托管字段", Modifier.weight(1f).fillMaxHeight(), compact = true) { onSectionChange(RuleSection.Advanced) }
                     }
                     Text("规则列表", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
@@ -1210,6 +1445,18 @@ private fun RulesPage(
                 }
             }
         }
+        RuleSection.General -> MihomoSettingsPage(
+            profile = state.activeProfile,
+            templateRoot = templateRoot,
+            onSave = onSaveMihomoSettings,
+            modifier = modifier,
+        )
+        RuleSection.Advanced -> AdvancedYamlPage(
+            profile = state.activeProfile,
+            templateRoot = templateRoot,
+            onSave = onSaveAdvancedYaml,
+            modifier = modifier,
+        )
     }
     if (deleting) JichangAlertDialog(onDismissRequest = { deleting = false }, title = { Text("删除所选规则？") },
         text = { Text("将从当前配置中删除 ${selectedRules.size} 条规则，此操作无法撤销。") },
@@ -1518,6 +1765,11 @@ private fun ExportPage(
                 )
             }
         }
+        Text(
+            "在当前手机导入时，建议直接下载配置文件，再从 Downloads/鸡场 中选择；局域网链接主要用于其他设备。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (!hasRegionalProxyGroups) OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
         } else Text("模板已包含地区筛选策略组，直接沿用模板分组。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1554,6 +1806,7 @@ private fun ActiveShareCard(url: String, onShareLink: () -> Unit, onStopShare: (
             LanShareQrCodeCard(url)
             SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
             Text("接收设备需连接可互访的同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("分享在后台通过前台服务继续运行，请保留状态栏通知。若系统、省电策略或网络切换结束服务，当前链接会失效；回到应用后可重新开启。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedButton(onClick = onShareLink, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
         }
     }
@@ -1844,12 +2097,38 @@ private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -
 
 @Composable
 private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    val context = LocalContext.current
     var raw by remember { mutableStateOf("") }
+    var scanError by remember { mutableStateOf<String?>(null) }
+    val scanner = remember(context) {
+        val options = com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .build()
+        com.google.mlkit.vision.codescanner.GmsBarcodeScanning.getClient(context, options)
+    }
     JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("导入节点") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("粘贴 Mihomo/Clash YAML、Base64 订阅、节点链接或 Surge 节点行。")
+            Text("粘贴或扫描 Mihomo/Clash 节点内容、节点分享链接。机场订阅二维码请在订阅页添加；没有 Google Play 服务时可直接粘贴。")
+            OutlinedButton(
+                onClick = {
+                    scanError = null
+                    scanner.startScan()
+                        .addOnSuccessListener { barcode ->
+                            barcode.rawValue?.takeIf(String::isNotBlank)?.let { raw = it; scanError = null }
+                                ?: run { scanError = "二维码没有可导入的内容" }
+                        }
+                        .addOnFailureListener { error -> scanError = error.localizedMessage ?: "无法启动扫码，请改用粘贴导入" }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("扫描节点二维码")
+            }
+            scanError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             OutlinedTextField(raw, { raw = it }, Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 240.dp), label = { Text("节点内容") }, minLines = 6)
         } },
         confirmButton = { TextButton(onClick = { onSave(raw) }, enabled = raw.isNotBlank()) { Text("解析并添加") } },
@@ -2369,14 +2648,16 @@ private fun ProfileDialog(profile: ConfigProfile, creating: Boolean, onDismiss: 
 private fun NodeEditDialog(node: ProxyNode, onDismiss: () -> Unit, onSave: (String, String, String, Int, Map<String, Any?>) -> Unit) {
     var name by remember(node.id) { mutableStateOf(node.name) }; var type by remember(node.id) { mutableStateOf(node.type) }
     var server by remember(node.id) { mutableStateOf(node.server) }; var port by remember(node.id) { mutableStateOf(node.port.toString()) }
-    var extra by remember(node.id) { mutableStateOf(node.options.filterKeys { it !in setOf("name", "type", "server", "port") }.entries.joinToString("\n") { "${it.key}=${it.value}" }) }
+    var extra by remember(node.id) { mutableStateOf(MihomoNodeOptionsYaml.dump(node.options)) }
+    val parsedOptions = remember(extra) { runCatching { MihomoNodeOptionsYaml.parse(extra) } }
     JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("编辑节点") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
         OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
-        OutlinedTextField(type, { type = it }, modifier = Modifier.fillMaxWidth(), label = { Text("协议类型") }, singleLine = true)
+        OutlinedTextField(type, { type = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Mihomo 协议类型") }, supportingText = { Text("例如 ss、ssr、vmess、vless、trojan、hysteria2、tuic、anytls") }, singleLine = true)
         OutlinedTextField(server, { server = it }, modifier = Modifier.fillMaxWidth(), label = { Text("服务器") }, singleLine = true)
         OutlinedTextField(port, { port = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("端口") }, singleLine = true)
-        OutlinedTextField(extra, { extra = it }, modifier = Modifier.fillMaxWidth(), label = { Text("其他选项，每行 key=value") }, minLines = 4)
-    } }, confirmButton = { TextButton(enabled = name.isNotBlank() && server.isNotBlank() && port.toIntOrNull() in 1..65535, onClick = { val options = extra.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].trim() } }.toMap(); onSave(name, type, server, port.toInt(), options) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+        OutlinedTextField(extra, { extra = it }, modifier = Modifier.fillMaxWidth(), label = { Text("协议参数 YAML") }, supportingText = { Text("保留布尔值、列表和 TLS/传输层嵌套结构。") }, textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), minLines = 6)
+        parsedOptions.exceptionOrNull()?.let { Text(it.message ?: "协议参数 YAML 无效", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+    } }, confirmButton = { TextButton(enabled = name.isNotBlank() && type.isNotBlank() && server.isNotBlank() && port.toIntOrNull() in 1..65535 && parsedOptions.isSuccess, onClick = { parsedOptions.getOrNull()?.let { onSave(name, type, server, port.toInt(), it) } }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable

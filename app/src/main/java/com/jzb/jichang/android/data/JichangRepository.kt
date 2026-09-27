@@ -19,6 +19,7 @@ import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.SubscriptionParser
 import com.jzb.jichang.android.service.MihomoTemplateParser
+import com.jzb.jichang.android.service.MihomoSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -163,6 +164,8 @@ class JichangRepository(private val dao: SnapshotDao) {
                 },
             ),
             templateId = template.id,
+            mihomoSettings = MihomoSettings.visualFieldsFromRoot(parsed.rawRoot),
+            advancedYaml = MihomoSettings.dumpAdvancedFields(parsed.rawRoot),
         )
         state.copy(nodes = state.nodes + importedNodes, profiles = state.profiles + profile, activeProfileId = profile.id)
     }.activeProfileId
@@ -481,6 +484,15 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     suspend fun saveRuleProfile(profile: RuleProfile) = updateProfile { it.copy(ruleProfile = profile) }
+
+    suspend fun saveMihomoSettings(settings: Map<String, Any?>) = updateProfile {
+        it.copy(mihomoSettings = MihomoSettings.normalizeVisualSettings(settings))
+    }
+
+    suspend fun saveAdvancedYaml(yaml: String) = updateProfile {
+        MihomoSettings.validateAdvancedYaml(yaml)
+        it.copy(advancedYaml = yaml)
+    }
 
     suspend fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = updateProfile { profile ->
         profile.copy(sourceMode = sourceMode, enabledRegions = enabledRegions, regionOverrides = regionOverrides)

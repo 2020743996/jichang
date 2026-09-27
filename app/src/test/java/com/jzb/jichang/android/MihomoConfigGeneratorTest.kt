@@ -202,7 +202,7 @@ class MihomoConfigGeneratorTest {
 
     @Test fun sanitizesUntrustedNamesAndCountsUnsupportedProtocols() {
         val unsafe = ProxyNode("1", null, "safe\nMATCH,example.org,DIRECT", "ss", "node.example", 443)
-        val unsupported = ProxyNode("2", null, "unsupported", "ssr", "node.example", 443)
+        val unsupported = ProxyNode("2", null, "unsupported", "zerotier", "node.example", 443)
         val output = MihomoConfigGenerator().generate(profileState(nodes = listOf(unsafe, unsupported)))
         @Suppress("UNCHECKED_CAST")
         val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)

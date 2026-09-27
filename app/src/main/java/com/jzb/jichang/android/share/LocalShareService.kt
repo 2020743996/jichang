@@ -26,8 +26,7 @@ class LocalShareService : Service() {
     private val binder = LocalBinder()
     private var server: ConfigServer? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
-    private var wifiLowLatencyLock: WifiManager.WifiLock? = null
-    private var wifiBackgroundLock: WifiManager.WifiLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     @Volatile private var sharedConfig: Pair<String, String>? = null
     var currentUrl: String? = null
         private set
@@ -99,27 +98,23 @@ class LocalShareService : Service() {
             }
         }
 
-        val wifiManager = getSystemService(WifiManager::class.java) ?: return
-        if (wifiLowLatencyLock == null) {
-            wifiLowLatencyLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "$packageName:lan-share-low-latency").apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        }
-        if (wifiBackgroundLock == null) {
-            wifiBackgroundLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:lan-share-background").apply {
-                setReferenceCounted(false)
-                acquire()
+        // Keep the radio available while the display is off. A failure to acquire this
+        // optional optimization must not tear down the already-running HTTP server.
+        runCatching {
+            val wifiManager = getSystemService(WifiManager::class.java) ?: return@runCatching
+            if (wifiLock == null) {
+                wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:lan-share").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
             }
         }
     }
 
     private fun releaseShareLocks() {
-        runCatching { if (wifiLowLatencyLock?.isHeld == true) wifiLowLatencyLock?.release() }
-        runCatching { if (wifiBackgroundLock?.isHeld == true) wifiBackgroundLock?.release() }
+        runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
         runCatching { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() }
-        wifiLowLatencyLock = null
-        wifiBackgroundLock = null
+        wifiLock = null
         cpuWakeLock = null
     }
 
@@ -169,7 +164,7 @@ class LocalShareService : Service() {
             Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setContentTitle("正在分享 Mihomo 配置")
-                .setContentText("仅持有随机链接的局域网设备可获取配置")
+                .setContentText("后台分享运行中 · 点此返回管理")
                 .setContentIntent(openPendingIntent)
                 .addAction(Notification.Action.Builder(Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止分享", stopPendingIntent).build())
                 .setOngoing(true).build()
@@ -178,7 +173,7 @@ class LocalShareService : Service() {
             Notification.Builder(this)
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setContentTitle("正在分享 Mihomo 配置")
-                .setContentText("局域网配置分享服务运行中")
+                .setContentText("后台分享运行中 · 点此返回管理")
                 .setContentIntent(openPendingIntent)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止分享", stopPendingIntent)
                 .setOngoing(true).build()

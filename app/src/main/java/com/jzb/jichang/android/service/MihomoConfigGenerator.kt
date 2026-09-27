@@ -34,7 +34,7 @@ data class GeneratedConfig(
 /** Builds one Mihomo profile; it intentionally has no per-client dialect matrix. */
 class MihomoConfigGenerator {
     private val supportedTypes = setOf(
-        "ss", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "wireguard",
+        "ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "wireguard",
         "anytls", "snell", "socks5", "http", "ssh", "socks"
     )
 
@@ -204,20 +204,24 @@ class MihomoConfigGenerator {
 
         val root = LinkedHashMap<String, Any?>().apply {
             putAll(templateRoot)
+            MihomoSettings.applyAdvancedFields(this, profile.advancedYaml)
             putIfAbsent("mixed-port", 7890)
             putIfAbsent("allow-lan", false)
             putIfAbsent("mode", "rule")
             putIfAbsent("log-level", "info")
             putIfAbsent("ipv6", true)
+            MihomoSettings.mergeVisualSettings(this, profile.mihomoSettings)
         }
         root["proxies"] = proxies
         if (outputTemplateProviders.isNotEmpty()) root["proxy-providers"] = outputTemplateProviders else root.remove("proxy-providers")
         if (ruleProfile.providers.isNotEmpty()) root["rule-providers"] = ruleProfile.providers
             .filter { it.name.isNotBlank() }
             .associateTo(LinkedHashMap()) { provider -> provider.name.safeKey() to ruleProviderMap(provider) }
+        else root.remove("rule-providers")
         if (ruleProfile.subRules.isNotEmpty()) root["sub-rules"] = ruleProfile.subRules
             .filter { it.name.isNotBlank() }
             .associateTo(LinkedHashMap()) { subRule -> subRule.name.safeKey() to subRule.rules.mapNotNull { sub -> serializeRule(sub, sub.group.ifBlank { "DIRECT" }, ruleProfile.subRules.map { it.name }.toSet(), ruleProfile.providers.map { it.name }.toSet()) } }
+        else root.remove("sub-rules")
         root["proxy-groups"] = groupYaml
         root["rules"] = regularRules
 
