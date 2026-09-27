@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
@@ -173,6 +175,47 @@ private enum class ConfigTab(val label: String) { Rules("规则"), Export("分�
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
 
+@Composable
+private fun JichangAlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    dismissButton: (@Composable () -> Unit)? = null,
+    icon: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null,
+    properties: DialogProperties = DialogProperties(),
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        modifier = modifier,
+        dismissButton = dismissButton,
+        icon = icon,
+        title = title,
+        text = text,
+        shape = MaterialTheme.shapes.large,
+        containerColor = MaterialTheme.colorScheme.surface,
+        iconContentColor = MaterialTheme.colorScheme.primary,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        tonalElevation = 0.dp,
+        properties = properties,
+    )
+}
+
+@Composable
+private fun JichangDialogSurface(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 0.dp,
+        content = content,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun JichangApp(viewModel: AppViewModel = viewModel()) {
@@ -222,7 +265,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val shareController = remember { LocalShareController(context) }
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
-    val shareStats by shareController.transferStats.collectAsState()
     val generator = remember { MihomoConfigGenerator() }
     val profile = state.activeProfile
     val parsedTemplate = remember(profile.templateId, state.templates) {
@@ -462,7 +504,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
         configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
-                                transferStats = shareStats,
                                 unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
                                 templateBindings = profile.templateProviderBindings,
@@ -503,7 +544,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         viewModel.renameTemplate(template.id, name)
         templateToRename = null
     }) }
-    templateToDelete?.let { template -> AlertDialog(
+    templateToDelete?.let { template -> JichangAlertDialog(
         onDismissRequest = { templateToDelete = null },
         title = { Text("删除模板？") },
         text = { Text("模板原文会从本机移除。正在使用此模板的配置需要先删除或改用其他模板。") },
@@ -540,7 +581,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     )
 
     pendingSensitiveAction?.let { action ->
-        AlertDialog(
+        JichangAlertDialog(
             onDismissRequest = { pendingSensitiveAction = null },
             title = { Text("配置包含机场订阅凭据") },
             text = { Text("引用模式会把已启用订阅地址写进 YAML。拿到文件或局域网分享链接的人可以使用这些订阅。请只分享给可信对象。") },
@@ -553,13 +594,13 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     }
 
     showProfileDeleteConfirmation?.let { targetId ->
-        AlertDialog(onDismissRequest = { showProfileDeleteConfirmation = null }, title = { Text("删除配置？") },
+        JichangAlertDialog(onDismissRequest = { showProfileDeleteConfirmation = null }, title = { Text("删除配置？") },
             text = { Text("只会删除此配置的规则和选择，不会删除共享订阅或节点。") },
             confirmButton = { TextButton(onClick = { viewModel.deleteProfile(targetId); showProfileDeleteConfirmation = null }) { Text("删除") } },
             dismissButton = { TextButton(onClick = { showProfileDeleteConfirmation = null }) { Text("取消") } })
     }
     if (appearanceDialog) {
-        AlertDialog(
+        JichangAlertDialog(
             onDismissRequest = { appearanceDialog = false },
             title = { Text("外观与玻璃效果") },
             text = {
@@ -710,9 +751,9 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                         color = if (source.lastError != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (source.id in profile.selectedSourceIds) when (source.providerCompatible) {
-                        true -> Text("已检测为 Mihomo YAML，可在配置中远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
-                        false -> Text("此订阅不是 Mihomo YAML；引用模式会把已解析节点内嵌。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
-                        null -> Text("尚未检测格式；刷新后可判断能否远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                        true -> Text("已检测为 Mihomo YAML，可在配置中远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        false -> Text("此订阅不是 Mihomo YAML；引用模式会把已解析节点内嵌。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        null -> Text("尚未检测格式；刷新后可判断能否远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -1013,7 +1054,6 @@ private fun ExportPage(
     filename: String,
     shareUrl: String?,
     shareError: String?,
-    transferStats: com.jzb.jichang.android.share.ShareTransferStats?,
     unresolvedTemplateProviders: List<String>,
     templateParameters: List<TemplateSubscriptionParameter>,
     templateBindings: Map<String, String>,
@@ -1037,9 +1077,12 @@ private fun ExportPage(
             }
         }
         Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SourceModeCard("内嵌节点", "节点写进 YAML", options.sourceMode == ConfigSourceMode.EMBED_NODES, Modifier.weight(1f)) { onModeChange(ConfigSourceMode.EMBED_NODES) }
-            SourceModeCard("引用订阅", "Mihomo 远程更新", options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, Modifier.weight(1f)) { onModeChange(ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) }
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SourceModeCard("内嵌节点", "节点写进 YAML", options.sourceMode == ConfigSourceMode.EMBED_NODES, Modifier.weight(1f).fillMaxHeight()) { onModeChange(ConfigSourceMode.EMBED_NODES) }
+            SourceModeCard("引用订阅", "Mihomo 远程更新", options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS, Modifier.weight(1f).fillMaxHeight()) { onModeChange(ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) }
         }
         if (options.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS && state.sources.any { it.id in profile.selectedSourceIds }) {
             Text(
@@ -1098,9 +1141,6 @@ private fun ExportPage(
                 LanShareQrCodeCard(url)
                 SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
                 Text("接收设备需连接同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                transferStats?.let { stats ->
-                    Text("最近传输：${formatBytes(stats.bytes)} · ${if (stats.compressed) "gzip" else "未压缩"} · 服务端 ${stats.serverMillis} ms", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onShareLink, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
                     TextButton(onClick = onStopShare) { Text("停止") }
@@ -1175,12 +1215,6 @@ private fun LanShareQrCodeCard(url: String) {
     }
 }
 
-private fun formatBytes(bytes: Int): String = when {
-    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024f * 1024f))
-    bytes >= 1024 -> "%.1f KB".format(bytes / 1024f)
-    else -> "$bytes B"
-}
-
 @Composable
 private fun TemplatesPage(
     templates: List<com.jzb.jichang.android.model.ConfigTemplate>,
@@ -1249,13 +1283,8 @@ private fun TemplatesPage(
 @Composable
 private fun TemplatePreviewDialog(template: com.jzb.jichang.android.model.ConfigTemplate, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface,
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp),
-            tonalElevation = 0.dp,
-        ) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        JichangDialogSurface(Modifier.fillMaxWidth(0.94f).widthIn(max = 760.dp).heightIn(max = 760.dp)) {
+            Column(Modifier.padding(JichangSpacing.dialog), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(template.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -1279,13 +1308,13 @@ private fun TemplateCreateDialog(
 ) {
     var name by remember(template.id) { mutableStateOf("${template.name} 副本") }
     var fileName by remember(template.id) { mutableStateOf("${template.name} 副本") }
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("基于模板新建配置") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("节点、策略组和规则会载入可视化编辑器；模板中的其他 Mihomo 字段会保留。")
-            OutlinedTextField(name, { name = it; if (fileName == "${template.name} 副本") fileName = it }, label = { Text("配置名称") }, singleLine = true)
-            OutlinedTextField(fileName, { fileName = it }, label = { Text("导出文件名") }, singleLine = true)
+            OutlinedTextField(name, { name = it; if (fileName == "${template.name} 副本") fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("配置名称") }, singleLine = true)
+            OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("导出文件名") }, singleLine = true)
         } },
         confirmButton = { TextButton(onClick = { onCreate(name.trim(), fileName.trim()) }, enabled = name.isNotBlank() && fileName.isNotBlank()) { Text("创建") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
@@ -1299,10 +1328,10 @@ private fun TemplateRenameDialog(
     onRename: (String) -> Unit,
 ) {
     var name by remember(template.id) { mutableStateOf(template.name) }
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("重命名模板") },
-        text = { OutlinedTextField(name, { name = it }, label = { Text("模板名称") }, singleLine = true) },
+        text = { OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("模板名称") }, singleLine = true) },
         confirmButton = { TextButton(onClick = { onRename(name.trim()) }, enabled = name.isNotBlank()) { Text("保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
@@ -1319,13 +1348,8 @@ private fun RemoteConfigDialog(
     var url by remember { mutableStateOf("") }
     var fileName by remember { mutableStateOf("") }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight(),
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 0.dp,
-        ) {
-            Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        JichangDialogSurface(Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight()) {
+            Column(Modifier.padding(JichangSpacing.dialog), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("从链接添加模板", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text("下载并在本机保存 Mihomo YAML 模板。模板可用于新建鸡场配置；链接不会保存。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(url, { url = it.trim() }, modifier = Modifier.fillMaxWidth(), label = { Text("配置链接") }, placeholder = { Text("https://example.com/config.yaml") }, singleLine = true, enabled = !downloading)
@@ -1351,9 +1375,9 @@ private fun RemoteConfigDialog(
 @Composable
 private fun SourceModeCard(title: String, detail: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             RadioButton(selected = selected, onClick = onClick)
-            Column(Modifier.padding(start = 4.dp)) {
+            Column(Modifier.weight(1f).padding(start = 4.dp), verticalArrangement = Arrangement.Center) {
                 Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -1386,12 +1410,12 @@ private fun EmptyCard(title: String, detail: String, onAction: () -> Unit) {
 private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("添加订阅") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(name, { name = it }, label = { Text("名称（可选）") }, singleLine = true)
-            OutlinedTextField(url, { url = it }, label = { Text("HTTP(S) 订阅地址") }, singleLine = true)
+            OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称（可选）") }, singleLine = true)
+            OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("HTTP(S) 订阅地址") }, singleLine = true)
         } },
         confirmButton = { TextButton(onClick = { onSave(name, url) }, enabled = url.isNotBlank()) { Text("添加并刷新") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
@@ -1413,12 +1437,12 @@ private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -
 @Composable
 private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var raw by remember { mutableStateOf("") }
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("导入节点") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("粘贴 Mihomo/Clash YAML、Base64 订阅、节点链接或 Surge 节点行。")
-            OutlinedTextField(raw, { raw = it }, Modifier.fillMaxWidth().height(220.dp), label = { Text("节点内容") }, minLines = 6)
+            OutlinedTextField(raw, { raw = it }, Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 240.dp), label = { Text("节点内容") }, minLines = 6)
         } },
         confirmButton = { TextButton(onClick = { onSave(raw) }, enabled = raw.isNotBlank()) { Text("解析并添加") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
@@ -1434,11 +1458,11 @@ private fun GroupDialog(state: AppState, initial: PolicyGroup?, onDismiss: () ->
     var members by remember(initial?.name, state.nodes) {
         mutableStateOf(initial?.members?.toSet()?.let { if (it.isEmpty()) allNodeKeys else it } ?: allNodeKeys)
     }
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("添加策略组") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(name, { name = it }, label = { Text("组名称") }, singleLine = true)
+            OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
             Box {
                 OutlinedButton(onClick = { expanded = true }) { Text("类型：$type") }
                 DropdownMenu(expanded, { expanded = false }) {
@@ -1493,7 +1517,7 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
     val composite = type in setOf("AND", "OR", "NOT")
     val valueRequired = type !in setOf("MATCH", "AND", "OR", "NOT")
     val valid = (!valueRequired || value.isNotBlank()) && (!composite || conditions.size >= if (type == "NOT") 1 else 2)
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier.fillMaxWidth(0.96f).widthIn(max = 620.dp),
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -1574,13 +1598,8 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
         categoryMatches && (query.isBlank() || type.contains(query, true))
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp),
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 0.dp,
-        ) {
-            Column(Modifier.padding(20.dp)) {
+        JichangDialogSurface(Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).heightIn(max = 700.dp)) {
+            Column(Modifier.padding(JichangSpacing.dialog)) {
                 Text("选择规则类型", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(top = 12.dp), label = { Text("搜索类型") }, singleLine = true)
                 androidx.compose.foundation.lazy.LazyRow(contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1688,7 +1707,7 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
             profile = profile.copy(subRules = profile.subRules.map { if (it.name == subNameKey) it.copy(rules = updatedRules) else it })
             editingSubRule = null
         })
-    } else AlertDialog(onDismissRequest = onDismiss, title = { Text("规则集与子规则") },
+    } else JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("规则集与子规则") },
         text = { Column(Modifier.height(440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("规则集提供者", style = MaterialTheme.typography.titleSmall)
             providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { profile = profile.copy(providers = providers - provider) }) { Icon(Icons.Outlined.Delete, null) } } } }
@@ -1718,16 +1737,16 @@ private fun RuleProviderEditor(initial: RuleProvider, onDismiss: () -> Unit, onS
     var interval by remember(initial.id) { mutableStateOf(initial.interval.toString()) }
     var payload by remember(initial.id) { mutableStateOf(initial.payload.joinToString("\n")) }
     var headers by remember(initial.id) { mutableStateOf(initial.headers.entries.joinToString("\n") { (key, values) -> key + "=" + values.joinToString(",") }) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("规则集提供者") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true)
+    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("规则集提供者") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
         SelectField("来源类型", type, listOf("http", "file", "inline")) { type = it }
         SelectField("匹配行为", behavior, listOf("domain", "ipcidr", "classical")) { behavior = it }
-        if (type == "http") OutlinedTextField(url, { url = it }, label = { Text("下载 URL") }, singleLine = true)
-        if (type == "http") OutlinedTextField(interval, { interval = it.filter(Char::isDigit) }, label = { Text("更新间隔（秒）") }, singleLine = true)
-        OutlinedTextField(path, { path = it }, label = { Text("本地缓存/文件路径") }, singleLine = true)
+        if (type == "http") OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("下载 URL") }, singleLine = true)
+        if (type == "http") OutlinedTextField(interval, { interval = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("更新间隔（秒）") }, singleLine = true)
+        OutlinedTextField(path, { path = it }, modifier = Modifier.fillMaxWidth(), label = { Text("本地缓存/文件路径") }, singleLine = true)
         SelectField("格式", format, listOf("yaml", "text", "mrs")) { format = it }
-        if (type == "http") OutlinedTextField(headers, { headers = it }, label = { Text("请求头，每行 key=value") }, minLines = 2)
-        if (type == "inline") OutlinedTextField(payload, { payload = it }, label = { Text("规则项，每行一条") }, minLines = 4)
+        if (type == "http") OutlinedTextField(headers, { headers = it }, modifier = Modifier.fillMaxWidth(), label = { Text("请求头，每行 key=value") }, minLines = 2)
+        if (type == "inline") OutlinedTextField(payload, { payload = it }, modifier = Modifier.fillMaxWidth(), label = { Text("规则项，每行一条") }, minLines = 4)
     } }, confirmButton = { TextButton(enabled = name.isNotBlank() && (type != "http" || url.startsWith("http")) && (type != "inline" || payload.isNotBlank()), onClick = {
         val parsedHeaders = headers.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].split(",").map(String::trim) } }.toMap()
         onSave(initial.copy(name = name.trim(), type = type, behavior = behavior, url = url, path = path, format = format, interval = interval.toIntOrNull() ?: 86400, payload = payload.lines().filter(String::isNotBlank), headers = parsedHeaders))
@@ -1739,9 +1758,9 @@ private fun ProfileDialog(profile: ConfigProfile, creating: Boolean, onDismiss: 
     var name by remember(profile.id, creating) { mutableStateOf(if (creating) "" else profile.name) }
     var fileName by remember(profile.id, creating) { mutableStateOf(if (creating) "" else profile.fileName) }
     var copy by remember { mutableStateOf(true) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (creating) "新建配置" else "配置设置") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(name, { name = it; if (creating && fileName.isBlank()) fileName = it }, label = { Text("配置名称") }, singleLine = true)
-        OutlinedTextField(fileName, { fileName = it }, label = { Text("导出文件名（无需 .yaml）") }, singleLine = true)
+    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text(if (creating) "新建配置" else "配置设置") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(name, { name = it; if (creating && fileName.isBlank()) fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("配置名称") }, singleLine = true)
+        OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("导出文件名（无需 .yaml）") }, singleLine = true)
         if (creating) Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(copy, { copy = it }); Text("复制当前规则和选择") }
     } }, confirmButton = { TextButton(enabled = name.isNotBlank() && fileName.isNotBlank(), onClick = { if (creating) onCreate(name.trim(), fileName.trim(), copy) else onSave(profile.id, name.trim(), fileName.trim()) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
@@ -1751,12 +1770,12 @@ private fun NodeEditDialog(node: ProxyNode, onDismiss: () -> Unit, onSave: (Stri
     var name by remember(node.id) { mutableStateOf(node.name) }; var type by remember(node.id) { mutableStateOf(node.type) }
     var server by remember(node.id) { mutableStateOf(node.server) }; var port by remember(node.id) { mutableStateOf(node.port.toString()) }
     var extra by remember(node.id) { mutableStateOf(node.options.filterKeys { it !in setOf("name", "type", "server", "port") }.entries.joinToString("\n") { "${it.key}=${it.value}" }) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("编辑节点") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true)
-        OutlinedTextField(type, { type = it }, label = { Text("协议类型") }, singleLine = true)
-        OutlinedTextField(server, { server = it }, label = { Text("服务器") }, singleLine = true)
-        OutlinedTextField(port, { port = it.filter(Char::isDigit) }, label = { Text("端口") }, singleLine = true)
-        OutlinedTextField(extra, { extra = it }, label = { Text("其他选项，每行 key=value") }, minLines = 4)
+    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("编辑节点") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
+        OutlinedTextField(type, { type = it }, modifier = Modifier.fillMaxWidth(), label = { Text("协议类型") }, singleLine = true)
+        OutlinedTextField(server, { server = it }, modifier = Modifier.fillMaxWidth(), label = { Text("服务器") }, singleLine = true)
+        OutlinedTextField(port, { port = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("端口") }, singleLine = true)
+        OutlinedTextField(extra, { extra = it }, modifier = Modifier.fillMaxWidth(), label = { Text("其他选项，每行 key=value") }, minLines = 4)
     } }, confirmButton = { TextButton(enabled = name.isNotBlank() && server.isNotBlank() && port.toIntOrNull() in 1..65535, onClick = { val options = extra.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].trim() } }.toMap(); onSave(name, type, server, port.toInt(), options) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
@@ -1773,7 +1792,7 @@ private fun ExportSetupDialog(
         (node.sourceId == null || node.sourceId in enabledSourceIds) && node.id in profile.enabledNodeIds
     }
     val regions = NodeAutoGroups.regions.map { it.key to it.title } + (NodeAutoGroups.OTHER to "其他")
-    AlertDialog(
+    JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("导出地区策略组") },
         text = {

@@ -50,6 +50,7 @@ internal object JichangSpacing {
     val section = 16.dp
     val item = 8.dp
     val card = 16.dp
+    val dialog = 20.dp
 }
 
 @Composable
