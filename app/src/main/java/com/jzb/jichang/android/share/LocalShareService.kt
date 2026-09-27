@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import com.jzb.jichang.android.MainActivity
 import fi.iki.elonen.NanoHTTPD
+import java.io.ByteArrayInputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.security.MessageDigest
@@ -40,6 +41,7 @@ class LocalShareService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        startForeground(NOTIFICATION_ID, notification())
         return START_NOT_STICKY
     }
 
@@ -127,15 +129,32 @@ class LocalShareService : Service() {
     }
 
     private class ConfigServer(host: String, private val token: String, private val config: () -> Pair<String, String>) : NanoHTTPD(host, 0) {
+        // NanoHTTPD otherwise enables gzip after serve() returns when the client advertises it.
+        // Keep this endpoint byte-for-byte YAML for clients that reject duplicate/invalid encodings.
+        override fun useGzipWhenAccepted(response: Response): Boolean = false
+
         override fun serve(session: IHTTPSession): Response {
-            if (session.method != Method.GET) return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed")
+            if (session.method != Method.GET && session.method != Method.HEAD) {
+                return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed")
+                    .apply { addHeader("Allow", "GET, HEAD") }
+            }
             val expected = "/$token/config.yaml"
             val actual = session.uri
             if (!MessageDigest.isEqual(expected.toByteArray(), actual.toByteArray())) {
                 return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
             }
             val (yaml, filename) = config()
-            return newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", yaml).apply {
+            // NanoHTTPD 2.3.1 writes the body even for HEAD. Give it an empty stream while
+            // retaining the length of the equivalent GET response in the metadata.
+            val response = if (session.method == Method.HEAD) {
+                newFixedLengthResponse(
+                    Response.Status.OK,
+                    "text/yaml; charset=utf-8",
+                    ByteArrayInputStream(ByteArray(0)),
+                    yaml.toByteArray(Charsets.UTF_8).size.toLong(),
+                )
+            } else newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", yaml)
+            return response.apply {
                 addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
                 addHeader("X-Content-Type-Options", "nosniff")
                 addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")

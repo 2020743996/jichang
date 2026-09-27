@@ -523,7 +523,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 } }
             }
         }
-    }
 
     if (showRemoteConfigDialog) RemoteConfigDialog(
         downloading = remoteDownloading,
@@ -623,6 +622,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             },
             confirmButton = { TextButton(onClick = { appearanceDialog = false }) { Text("完成") } },
         )
+    }
     }
 }
 
@@ -728,7 +728,7 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                 Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("添加订阅")
             }
         }
-        if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "添加机场订阅，或到“节点”页直接导入节点链接。", onAdd) }
+        if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "使用上方按钮添加机场订阅，或到“节点”页直接导入节点链接。") }
         items(state.sources, key = { it.id }) { source ->
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -812,7 +812,8 @@ private fun NodesPage(
                 Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
                     Box(Modifier.weight(1f)) {
                         OutlinedButton(onClick = { expandedProtocol = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text(protocolFilter, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null)
+                            Text(protocolFilter, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Outlined.KeyboardArrowDown, null)
                         }
                         DropdownMenu(expandedProtocol, { expandedProtocol = false }) {
                             protocols.forEach { protocol -> DropdownMenuItem(text = { Text(protocol) }, onClick = { protocolFilter = protocol; expandedProtocol = false }) }
@@ -831,8 +832,8 @@ private fun NodesPage(
                 }
             }
         }
-        if (state.nodes.isEmpty()) item { EmptyCard("还没有节点", "导入 Mihomo YAML、Base64 订阅或节点链接。", onAdd) }
-        else if (filtered.isEmpty()) item { EmptyCard("没有匹配的节点", "换个搜索词或清除筛选条件。", onAdd) }
+        if (state.nodes.isEmpty()) item { EmptyCard("还没有节点", "使用上方按钮导入 Mihomo YAML、Base64 订阅或节点链接。") }
+        else if (filtered.isEmpty()) item { EmptyCard("没有匹配的节点", "换个搜索词或清除筛选条件。") }
         else items(filtered, key = { it.id }) { node ->
             val region = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
             NodeRow(
@@ -864,7 +865,8 @@ private fun DropdownMenuFilter(value: String, onValue: (String) -> Unit, modifie
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Text(value, maxLines = 1); Icon(Icons.Outlined.KeyboardArrowDown, null)
+            Text(value, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(Icons.Outlined.KeyboardArrowDown, null)
         }
         DropdownMenu(expanded, { expanded = false }) {
             listOf("全部", "已启用", "已停用").forEach { option ->
@@ -879,7 +881,8 @@ private fun ChoiceMenu(label: String, options: List<String>, onValue: (String) -
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Text(label, maxLines = 1, modifier = Modifier.weight(1f)); Icon(Icons.Outlined.KeyboardArrowDown, null)
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(Icons.Outlined.KeyboardArrowDown, null)
         }
         DropdownMenu(expanded, { expanded = false }) {
             options.distinct().forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { onValue(option); expanded = false }) }
@@ -967,7 +970,7 @@ private fun RulesPage(
                     matchesText && matchesCategory
                 }
                 if (state.ruleProfile.rules.isEmpty()) {
-                    EmptyCard("从第一条规则开始", "选择匹配类型、内容和策略；MATCH 兜底会自动放在最后。", onAddRule)
+                    EmptyCard("从第一条规则开始", "使用上方按钮选择匹配类型、内容和策略；MATCH 兜底会自动放在最后。")
                 } else if (filtered.isEmpty()) {
                     Text("没有符合筛选条件的规则。", Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -985,7 +988,7 @@ private fun RulesPage(
             1 -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 HeaderCard("策略组", "规则的执行目标。每个组可以手选节点，也可以自动测速或故障转移。")
                 OutlinedButton(onClick = onAddGroup, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(8.dp)); Text("新建策略组") }
-                if (state.ruleProfile.groups.isEmpty()) EmptyCard("还没有策略组", "创建策略组后，规则就可以选择对应的出口。", onAddGroup)
+                if (state.ruleProfile.groups.isEmpty()) EmptyCard("还没有策略组", "使用上方按钮创建策略组后，规则就可以选择对应的出口。")
                 else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(state.ruleProfile.groups, key = { it.name }) { group ->
                         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1250,7 +1253,7 @@ private fun TemplatesPage(
             }
         }
         if (templates.isEmpty()) item {
-            EmptyCard("模板库还是空的", "添加一份 Mihomo YAML 模板，以它为基础创建自己的配置。", onAdd)
+            EmptyCard("模板库还是空的", "使用上方按钮添加 Mihomo YAML 模板，以它为基础创建自己的配置。")
         }
         items(templates, key = { it.id }) { template ->
             val users = profiles.count { it.templateId == template.id }
@@ -1396,12 +1399,11 @@ private fun HeaderCard(title: String, detail: String) {
 }
 
 @Composable
-private fun EmptyCard(title: String, detail: String, onAction: () -> Unit) {
+private fun EmptyCard(title: String, detail: String) {
     Card(Modifier.fillMaxWidth().padding(vertical = 16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            OutlinedButton(onClick = onAction) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(6.dp)); Text("添加") }
         }
     }
 }

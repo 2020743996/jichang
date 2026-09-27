@@ -38,13 +38,30 @@ class LocalShareController(context: Context) {
     }
 
     fun start(config: String, filename: String) {
-        pendingConfig = config to filename
         mutableError.value = null
+        service?.let { activeService ->
+            runCatching {
+                ContextCompat.startForegroundService(appContext, Intent(appContext, LocalShareService::class.java))
+                activeService.startSharing(config, filename)
+            }
+                .onSuccess { mutableUrl.value = it }
+                .onFailure { error ->
+                    mutableUrl.value = null
+                    mutableError.value = error.message ?: "无法启动局域网分享"
+                }
+            return
+        }
+        pendingConfig = config to filename
+        mutableUrl.value = null
         val intent = Intent(appContext, LocalShareService::class.java)
-        ContextCompat.startForegroundService(appContext, intent)
-        if (!bound) {
-            bound = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            if (!bound) mutableError.value = "无法连接局域网分享服务"
+        runCatching {
+            ContextCompat.startForegroundService(appContext, intent)
+            if (!bound) bound = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            check(bound) { "无法连接局域网分享服务" }
+        }.onFailure { error ->
+            pendingConfig = null
+            mutableError.value = error.message ?: "无法启动局域网分享"
+            appContext.stopService(intent)
         }
     }
 
