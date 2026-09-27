@@ -132,11 +132,12 @@ class MihomoConfigGenerator {
         val allNodeNames = state.nodes.associate { it.id to it.name.safeName() }
         val groupYaml = groups.map { group ->
             val isGenerated = generated.groups.any { it.name == group.name }
-            val isDefaultMaster = !isGenerated && group.name == "PROXY" && group.members.isEmpty() && generated.groups.isNotEmpty()
+            val isDefaultMaster = !isGenerated && group.name == "PROXY" && group.members.isEmpty() && !group.membersExplicit && generated.groups.isNotEmpty()
             val configuredMembers = when {
                 isGenerated -> group.members
                 isDefaultMaster -> generated.groups.map { it.name }
-                group.members.isEmpty() -> names
+                group.members.isEmpty() && !group.membersExplicit -> names
+                group.members.isEmpty() -> emptyList()
                 else -> group.members.mapNotNull { member ->
                     val id = member.removePrefix("node:")
                     proxyNamesById[id] ?: member.takeUnless { member.startsWith("node:") }
@@ -177,10 +178,10 @@ class MihomoConfigGenerator {
                             filters.second?.let { put("exclude-filter", it) }
                         }
                     } else if (!isDefaultMaster && group.extra["use"] == null && group.name !in groupsUsingTemplateProviders) {
-                        val remoteMembers = if (group.members.isEmpty()) includedRemoteNodes else group.members.mapNotNull { member ->
+                        val remoteMembers = if (group.members.isEmpty() && !group.membersExplicit) includedRemoteNodes else group.members.mapNotNull { member ->
                             if (member.startsWith("node:")) includedRemoteNodes.firstOrNull { it.id == member.removePrefix("node:") } else null
                         }
-                        if (remoteMembers.isNotEmpty() || group.members.isEmpty()) {
+                        if (remoteMembers.isNotEmpty() || (group.members.isEmpty() && !group.membersExplicit)) {
                             put("use", providerNames)
                             if (group.members.isNotEmpty()) put("filter", combinePatterns(remoteMembers.map { exactNamePattern(allNodeNames[it.id].orEmpty()) }) ?: "$^")
                         }

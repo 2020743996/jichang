@@ -9,6 +9,8 @@ import com.jzb.jichang.android.model.AppState
 import com.jzb.jichang.android.model.ProxyNode
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.model.RuleProfile
+import com.jzb.jichang.android.model.RuleProviderStatus
+import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.SubscriptionSource
 import kotlinx.coroutines.delay
@@ -74,49 +76,32 @@ class SubscriptionRepositoryTest {
         }
     }
 
-    @Test fun ruleRecipesAreSharedAndApplyingSkipsDuplicatesAndKeepsMatchLast() = runBlocking {
-        val repository = JichangRepository(InMemorySnapshotDao())
+    @Test fun oldRecipeDataIsIgnoredAndRemovedOnNextSnapshotSave() = runBlocking {
+        val legacyJson = JsonParser.parseString(Gson().toJson(AppState())).asJsonObject.apply {
+            add("ruleRecipes", JsonParser.parseString("[]"))
+            remove("ruleProviderStatuses")
+        }.toString()
+        val dao = InMemorySnapshotDao(legacyJson)
+        val repository = JichangRepository(dao)
         delay(100)
-        val rules = listOf(
-            RoutingRule("GEOSITE", "category-ads-all", "REJECT"),
-            RoutingRule("GEOSITE", "cn", "DIRECT"),
-            RoutingRule("GEOSITE", "geolocation-!cn", "PROXY"),
-            RoutingRule("MATCH", "MATCH", "PROXY"),
-        )
         try {
-            val id = repository.saveRuleRecipe("基础分流", rules)
-            repository.createProfile("第二份", "second", false)
-            assertEquals(4 to 0, repository.applyRuleRecipe(repository.state.value.ruleRecipes.single().rules))
-            assertEquals("MATCH", repository.state.value.ruleProfile.rules.last().type)
-            assertEquals(0 to 4, repository.applyRuleRecipe(repository.state.value.ruleRecipes.single().rules))
-            repository.renameRuleRecipe(id, "家庭分流")
-            assertEquals("家庭分流", repository.state.value.ruleRecipes.single().name)
-            repository.deleteRuleRecipe(id)
-            assertTrue(repository.state.value.ruleRecipes.isEmpty())
+            assertTrue(repository.state.value.ruleProviderStatuses.isEmpty())
+            val profile = repository.state.value.activeProfile
+            repository.updateExportSettings(profile.sourceMode, profile.enabledRegions, profile.regionOverrides)
+            assertTrue(!JsonParser.parseString(dao.readStored()).asJsonObject.has("ruleRecipes"))
         } finally {
             repository.close()
         }
     }
 
-    @Test fun recipeWithMissingTargetIsRejectedWithoutChangingRules() = runBlocking {
+    @Test fun ruleProviderStatusIsStoredLocallyAndCanKeepLastSuccessOnFailure() = runBlocking {
         val repository = JichangRepository(InMemorySnapshotDao())
         delay(100)
         try {
-            val before = repository.state.value.ruleProfile.rules
-            val result = runCatching { repository.applyRuleRecipe(listOf(RoutingRule("DOMAIN", "example.com", "MISSING"))) }
-            assertTrue(result.isFailure)
-            assertEquals(before, repository.state.value.ruleProfile.rules)
-        } finally {
-            repository.close()
-        }
-    }
-
-    @Test fun olderSnapshotsWithoutRecipeLibraryLoadWithAnEmptyLibrary() = runBlocking {
-        val legacy = JsonParser.parseString(Gson().toJson(AppState())).asJsonObject.apply { remove("ruleRecipes") }.toString()
-        val repository = JichangRepository(InMemorySnapshotDao(legacy))
-        delay(100)
-        try {
-            assertTrue(repository.state.value.ruleRecipes.isEmpty())
+            val status = RuleProviderStatus("default", "provider-1", 1234L, itemCount = 18, cacheFileName = "provider-1.cache")
+            repository.updateRuleProviderStatus(status)
+            repository.updateRuleProviderStatus(status.copy(error = "HTTP 503"))
+            assertEquals(status.copy(error = "HTTP 503"), repository.state.value.ruleProviderStatuses.single())
         } finally {
             repository.close()
         }
@@ -128,16 +113,48 @@ class SubscriptionRepositoryTest {
         try {
             repository.addGroup("BACKUP", "select", emptyList())
             repository.saveRuleProfile(RuleProfile(
-                groups = listOf(com.jzb.jichang.android.model.PolicyGroup("PROXY"), com.jzb.jichang.android.model.PolicyGroup("BACKUP")),
+                groups = listOf(
+                    com.jzb.jichang.android.model.PolicyGroup("PROXY"),
+                    com.jzb.jichang.android.model.PolicyGroup("BACKUP"),
+                    com.jzb.jichang.android.model.PolicyGroup("WRAPPER", members = listOf("PROXY")),
+                ),
                 rules = listOf(RoutingRule("DOMAIN", "example.com", "PROXY")),
                 subRules = listOf(SubRuleProfile("local", listOf(RoutingRule("DOMAIN", "local.test", "PROXY")))),
             ))
             repository.updateGroup("PROXY", "FAST", "select", emptyList())
             assertEquals("FAST", repository.state.value.ruleProfile.rules.single().group)
             assertEquals("FAST", repository.state.value.ruleProfile.subRules.single().rules.single().group)
+            assertEquals(listOf("FAST"), repository.state.value.ruleProfile.groups.single { it.name == "WRAPPER" }.members)
             repository.removeGroup("FAST")
             assertEquals("BACKUP", repository.state.value.ruleProfile.rules.single().group)
             assertEquals("BACKUP", repository.state.value.ruleProfile.subRules.single().rules.single().group)
+            assertTrue(repository.state.value.ruleProfile.groups.single { it.name == "WRAPPER" }.members.isEmpty())
+        } finally {
+            repository.close()
+        }
+    }
+
+    @Test fun creatingStrategyGroupUpdatesSelectedRulesAndAddsRuleSetRoutesBeforeMatch() = runBlocking {
+        val node = ProxyNode("node-1", null, "one", "ss", "node.example", 443)
+        val provider = RuleProvider("provider-1", "ads", type = "http", url = "https://rules.example/ads.yaml")
+        val profile = com.jzb.jichang.android.model.ConfigProfile(
+            "default", "默认配置", enabledNodeIds = setOf(node.id),
+            ruleProfile = RuleProfile(
+                groups = listOf(com.jzb.jichang.android.model.PolicyGroup("PROXY")),
+                rules = listOf(RoutingRule("DOMAIN", "example.com", "PROXY"), RoutingRule("MATCH", "MATCH", "PROXY")),
+                providers = listOf(provider),
+            ),
+        )
+        val repository = JichangRepository(InMemorySnapshotDao(Gson().toJson(AppState(nodes = listOf(node), profiles = listOf(profile)))))
+        delay(100)
+        try {
+            repository.addGroup("FAST", "select", listOf("node:${node.id}", "PROXY"), setOf(0), setOf(provider.id))
+            val updated = repository.state.value.ruleProfile
+            assertTrue(updated.groups.last().membersExplicit)
+            assertEquals(listOf("node:${node.id}", "PROXY"), updated.groups.last().members)
+            assertEquals("FAST", updated.rules[0].group)
+            assertEquals(RoutingRule("RULE-SET", "ads", "FAST"), updated.rules[1])
+            assertEquals("MATCH", updated.rules.last().type)
         } finally {
             repository.close()
         }
@@ -147,5 +164,6 @@ class SubscriptionRepositoryTest {
         private val payload = MutableStateFlow(initial)
         override fun observe(): Flow<String?> = payload
         override suspend fun save(snapshot: SnapshotEntity) { payload.value = snapshot.payload }
+        fun readStored(): String = payload.value.orEmpty()
     }
 }

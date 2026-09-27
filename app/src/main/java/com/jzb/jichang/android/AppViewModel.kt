@@ -12,9 +12,14 @@ import com.jzb.jichang.android.model.AppState
 import com.jzb.jichang.android.model.ConfigProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.model.RuleProfile
+import com.jzb.jichang.android.model.RuleProviderStatus
 import com.jzb.jichang.android.service.GeneratedConfig
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.ConfigExportOptions
+import com.jzb.jichang.android.service.RuleProviderRefresher
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
@@ -30,6 +35,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var generated: GeneratedConfig = generator.generate(AppState())
         private set
     var refreshingSourceIds: Set<String> by mutableStateOf(emptySet())
+        private set
+    var refreshingRuleProviderIds: Set<String> by mutableStateOf(emptySet())
+        private set
+    var ruleProviderPreview: Pair<String, String>? by mutableStateOf(null)
         private set
 
     fun generate(profile: ConfigProfile = state.value.activeProfile): GeneratedConfig {
@@ -49,13 +58,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun renameTemplate(id: String, name: String) = run { repository.renameTemplate(id, name); "模板名称已更新" }
     fun deleteTemplate(id: String) = run { repository.deleteTemplate(id); "模板已删除" }
-    fun saveRuleRecipe(name: String, rules: List<RoutingRule>) = run { repository.saveRuleRecipe(name, rules); "规则配方已保存" }
-    fun renameRuleRecipe(id: String, name: String) = run { repository.renameRuleRecipe(id, name); "配方名称已更新" }
-    fun deleteRuleRecipe(id: String) = run { repository.deleteRuleRecipe(id); "规则配方已删除" }
-    fun applyRuleRecipe(rules: List<RoutingRule>) = run {
-        val (added, skipped) = repository.applyRuleRecipe(rules)
-        "配方已应用：新增 $added 条，跳过重复 $skipped 条"
+    fun updateRuleProviderStatus(status: RuleProviderStatus) = run { repository.updateRuleProviderStatus(status); null }
+    fun refreshRuleProvider(profile: ConfigProfile, provider: com.jzb.jichang.android.model.RuleProvider) = run {
+        refreshingRuleProviderIds = refreshingRuleProviderIds + provider.id
+        try {
+            val refreshed = withContext(Dispatchers.IO) {
+                RuleProviderRefresher().refresh(provider, File(getApplication<Application>().filesDir, "rule-providers/${profile.id}"))
+            }
+            repository.updateRuleProviderStatus(RuleProviderStatus(profile.id, provider.id, System.currentTimeMillis(), null, refreshed.itemCount, refreshed.cacheFileName))
+            "规则集已刷新${refreshed.itemCount?.let { "，$it 项" }.orEmpty()}"
+        } catch (error: Throwable) {
+            val previous = state.value.ruleProviderStatuses.firstOrNull { it.profileId == profile.id && it.providerId == provider.id }
+            repository.updateRuleProviderStatus(RuleProviderStatus(profile.id, provider.id, previous?.refreshedAt, error.message ?: "刷新失败", previous?.itemCount, previous?.cacheFileName))
+            throw error
+        } finally {
+            refreshingRuleProviderIds = refreshingRuleProviderIds - provider.id
+        }
     }
+    fun previewRuleProvider(profile: ConfigProfile, provider: com.jzb.jichang.android.model.RuleProvider, status: RuleProviderStatus?) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    RuleProviderRefresher().preview(provider, File(getApplication<Application>().filesDir, "rule-providers/${profile.id}"), status?.cacheFileName)
+                }
+            }.onSuccess { ruleProviderPreview = provider.name to it }
+                .onFailure { message = it.message ?: "无法预览规则集"; messageIsError = true }
+        }
+    }
+    fun dismissRuleProviderPreview() { ruleProviderPreview = null }
     fun switchProfile(id: String) = run { repository.switchProfile(id); null }
     fun updateProfile(id: String, name: String, fileName: String) = run { repository.updateProfile(id, name, fileName); "配置已保存" }
     fun deleteProfile(id: String) = run { repository.deleteProfile(id); "配置已删除" }
@@ -103,7 +133,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setNodesEnabled(ids: Set<String>, enabled: Boolean) = run { repository.setNodesEnabled(ids, enabled); "已${if (enabled) "启用" else "停用"} ${ids.size} 个节点" }
     fun updateNode(id: String, name: String, type: String, server: String, port: Int, options: Map<String, Any?>) = run { repository.updateNode(id, name, type, server, port, options); "节点已保存" }
     fun removeNode(id: String) = run { repository.removeNode(id); "节点已删除" }
-    fun addGroup(name: String, type: String, members: List<String>) = run { repository.addGroup(name, type, members); "策略组已添加" }
+    fun addGroup(name: String, type: String, members: List<String>, ruleIndices: Set<Int> = emptySet(), providerIds: Set<String> = emptySet()) = run {
+        repository.addGroup(name, type, members, ruleIndices, providerIds); "策略组已添加，关联规则目标已更新"
+    }
     fun updateGroup(oldName: String, name: String, type: String, members: List<String>) = run { repository.updateGroup(oldName, name, type, members); "策略组已更新" }
     fun removeGroup(name: String) = run { repository.removeGroup(name); "策略组已删除" }
     fun addRule(rule: RoutingRule) = run { repository.addRule(rule); "规则已添加" }
@@ -111,6 +143,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun moveRule(index: Int, offset: Int) = run { repository.moveRule(index, offset); "规则顺序已更新" }
     fun removeRule(index: Int) = run { repository.removeRule(index); "规则已删除" }
     fun removeRules(indices: Set<Int>) = run { repository.removeRules(indices); "已删除 ${indices.size} 条规则" }
+    fun changeRuleTargets(indices: Set<Int>, target: String) = run { repository.changeRuleTargets(indices, target); "已将 ${indices.size} 条规则的目标改为 $target" }
+    fun duplicateRule(index: Int) = run { repository.duplicateRule(index); "规则已复制" }
     fun saveRuleProfile(profile: RuleProfile) = run { repository.saveRuleProfile(profile); "规则集配置已保存" }
     fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = run { repository.updateExportSettings(sourceMode, enabledRegions, regionOverrides); null }
     fun bindTemplateProvider(name: String, sourceId: String?) = run { repository.setTemplateProviderBinding(name, sourceId); "模板订阅绑定已更新" }

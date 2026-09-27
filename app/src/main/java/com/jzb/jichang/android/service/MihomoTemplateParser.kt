@@ -57,7 +57,7 @@ class MihomoTemplateParser {
         val ruleProviders = root["rule-providers"].asStringMap()?.mapNotNull { (name, raw) ->
             val map = raw.asStringMap() ?: return@mapNotNull null
             RuleProvider(
-                id = UUID.randomUUID().toString(), name = name,
+                id = UUID.nameUUIDFromBytes("mihomo-rule-provider:$name".toByteArray(Charsets.UTF_8)).toString(), name = name,
                 type = map["type"]?.toString() ?: "http",
                 url = map["url"]?.toString().orEmpty(),
                 path = map["path"]?.toString().orEmpty(),

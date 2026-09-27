@@ -29,6 +29,8 @@ data class PolicyGroup(
     val members: List<String> = emptyList(),
     /** Keeps Mihomo group options that the visual editor does not expose. */
     val extra: Map<String, Any?> = emptyMap(),
+    /** Distinguishes an intentionally empty selection from legacy auto-include-all groups. */
+    val membersExplicit: Boolean = false,
 )
 
 /** A serializable rule condition. Groups use operator=AND/OR/NOT; leaves use type/value. */
@@ -66,6 +68,9 @@ data class RuleProvider(
     val payload: List<String> = emptyList(),
     val headers: Map<String, List<String>> = emptyMap(),
     val extra: Map<String, Any?> = emptyMap(),
+    /** The downloaded config template this provider was copied from, if any. */
+    val sourceTemplateId: String? = null,
+    val sourceTemplateName: String? = null,
 )
 
 data class SubRuleProfile(
@@ -103,11 +108,13 @@ data class ConfigTemplate(
     val createdAt: Long = System.currentTimeMillis(),
 )
 
-data class RuleRecipe(
-    val id: String,
-    val name: String,
-    val rules: List<RoutingRule> = emptyList(),
-    val createdAt: Long = System.currentTimeMillis(),
+data class RuleProviderStatus(
+    val profileId: String,
+    val providerId: String,
+    val refreshedAt: Long? = null,
+    val error: String? = null,
+    val itemCount: Int? = null,
+    val cacheFileName: String? = null,
 )
 
 data class AppState(
@@ -116,7 +123,7 @@ data class AppState(
     val profiles: List<ConfigProfile> = listOf(ConfigProfile("default", "默认配置")),
     val activeProfileId: String = "default",
     val templates: List<ConfigTemplate> = emptyList(),
-    val ruleRecipes: List<RuleRecipe> = emptyList(),
+    val ruleProviderStatuses: List<RuleProviderStatus> = emptyList(),
 ) {
     val activeProfile: ConfigProfile
         get() = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull() ?: ConfigProfile("default", "默认配置")

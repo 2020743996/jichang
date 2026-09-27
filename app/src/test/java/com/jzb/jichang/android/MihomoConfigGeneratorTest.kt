@@ -184,6 +184,22 @@ class MihomoConfigGeneratorTest {
         assertEquals(listOf("DOMAIN-SUFFIX,example.com,PROXY", "MATCH,PROXY"), rules)
     }
 
+    @Test fun explicitlyEmptyStrategyGroupDoesNotExpandToAllEnabledNodes() {
+        val node = ProxyNode("node-1", null, "Node one", "ss", "node.example", 443)
+        val state = profileState(
+            nodes = listOf(node),
+            ruleProfile = RuleProfile(groups = listOf(PolicyGroup("EMPTY", membersExplicit = true))),
+        )
+
+        val output = MihomoConfigGenerator().generate(state)
+        @Suppress("UNCHECKED_CAST")
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
+        @Suppress("UNCHECKED_CAST")
+        val groups = root["proxy-groups"] as List<Map<String, Any?>>
+
+        assertEquals(listOf("DIRECT"), groups.single { it["name"] == "EMPTY" }["proxies"])
+    }
+
     @Test fun sanitizesUntrustedNamesAndCountsUnsupportedProtocols() {
         val unsafe = ProxyNode("1", null, "safe\nMATCH,example.org,DIRECT", "ss", "node.example", 443)
         val unsupported = ProxyNode("2", null, "unsupported", "ssr", "node.example", 443)

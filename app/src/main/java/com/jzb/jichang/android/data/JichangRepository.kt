@@ -14,7 +14,7 @@ import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.model.SubscriptionSource
 import com.jzb.jichang.android.model.RuleProvider
-import com.jzb.jichang.android.model.RuleRecipe
+import com.jzb.jichang.android.model.RuleProviderStatus
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.SubscriptionParser
@@ -82,10 +82,10 @@ class JichangRepository(private val dao: SnapshotDao) {
             val profiles = gson.fromJson<List<ConfigProfile>>(profilesJson, object : TypeToken<List<ConfigProfile>>() {}.type)
                 .map { it.copy(templateProviderBindings = it.templateProviderBindings.orEmpty()) }
             val activeId = json.get("activeProfileId")?.asString?.takeIf { id -> profiles.any { it.id == id } } ?: profiles.first().id
-            val ruleRecipes = json.getAsJsonArray("ruleRecipes")?.let {
-                gson.fromJson<List<RuleRecipe>>(it, object : TypeToken<List<RuleRecipe>>() {}.type)
+            val ruleProviderStatuses = json.getAsJsonArray("ruleProviderStatuses")?.let {
+                gson.fromJson<List<RuleProviderStatus>>(it, object : TypeToken<List<RuleProviderStatus>>() {}.type)
             }.orEmpty()
-            return AppState(sources, nodes, profiles, activeId, templates, ruleRecipes)
+            return AppState(sources, nodes, profiles, activeId, templates, ruleProviderStatuses)
         }
 
         // Version-1 stored one global rule profile and global enabled flags on resources.
@@ -140,51 +140,9 @@ class JichangRepository(private val dao: SnapshotDao) {
         state.copy(templates = state.templates.filterNot { it.id == templateId })
     }
 
-    suspend fun saveRuleRecipe(name: String, rules: List<RoutingRule>): String = update { state ->
-        val cleanName = name.trim()
-        require(cleanName.isNotBlank()) { "请输入配方名称" }
-        require(state.ruleRecipes.none { it.name.equals(cleanName, true) }) { "配方名称已存在" }
-        require(rules.isNotEmpty()) { "当前没有可保存的规则" }
-        state.copy(ruleRecipes = state.ruleRecipes + RuleRecipe(UUID.randomUUID().toString(), cleanName, rules.toList()))
-    }.ruleRecipes.last().id
-
-    suspend fun renameRuleRecipe(id: String, name: String) = update { state ->
-        val cleanName = name.trim()
-        require(cleanName.isNotBlank()) { "请输入配方名称" }
-        require(state.ruleRecipes.any { it.id == id }) { "配方不存在" }
-        require(state.ruleRecipes.none { it.id != id && it.name.equals(cleanName, true) }) { "配方名称已存在" }
-        state.copy(ruleRecipes = state.ruleRecipes.map { if (it.id == id) it.copy(name = cleanName) else it })
-    }
-
-    suspend fun deleteRuleRecipe(id: String) = update { state ->
-        require(state.ruleRecipes.any { it.id == id }) { "配方不存在" }
-        state.copy(ruleRecipes = state.ruleRecipes.filterNot { it.id == id })
-    }
-
-    suspend fun applyRuleRecipe(rules: List<RoutingRule>): Pair<Int, Int> {
-        var result = 0 to 0
-        updateProfile { profile ->
-            val merged = profile.ruleProfile.rules.toMutableList()
-            var added = 0
-            var skipped = 0
-            rules.forEach { rule ->
-                val duplicate = if (rule.type.equals("MATCH", true)) {
-                    merged.any { it.type.equals("MATCH", true) }
-                } else rule in merged
-                if (duplicate) skipped++ else {
-                    validateRule(rule, profile.ruleProfile)
-                    if (rule.type.equals("MATCH", true)) merged.removeAll { it.type.equals("MATCH", true) }
-                    merged += rule
-                    added++
-                }
-            }
-            val fallback = merged.lastOrNull { it.type.equals("MATCH", true) }
-            merged.removeAll { it.type.equals("MATCH", true) }
-            fallback?.let(merged::add)
-            result = added to skipped
-            profile.copy(ruleProfile = profile.ruleProfile.copy(rules = merged))
-        }
-        return result
+    suspend fun updateRuleProviderStatus(status: RuleProviderStatus) = update { state ->
+        val key = status.profileId to status.providerId
+        state.copy(ruleProviderStatuses = state.ruleProviderStatuses.filterNot { (it.profileId to it.providerId) == key } + status)
     }
 
     suspend fun createProfileFromTemplate(name: String, fileName: String, templateId: String): String = update { state ->
@@ -312,12 +270,17 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     suspend fun removeSource(sourceId: String) = update { state ->
+        val removedNodeIds = state.nodes.filter { it.sourceId == sourceId }.map { "node:${it.id}" }.toSet()
         state.copy(
             sources = state.sources.filterNot { it.id == sourceId },
             nodes = state.nodes.filterNot { it.sourceId == sourceId },
             profiles = state.profiles.map { profile -> profile.copy(
                 selectedSourceIds = profile.selectedSourceIds - sourceId,
                 enabledNodeIds = profile.enabledNodeIds - state.nodes.filter { it.sourceId == sourceId }.map { it.id }.toSet(),
+                ruleProfile = profile.ruleProfile.copy(groups = profile.ruleProfile.groups.map { group ->
+                    val remaining = group.members - removedNodeIds
+                    if (remaining.size != group.members.size) group.copy(members = remaining, membersExplicit = true) else group
+                }),
             ) },
         )
     }
@@ -362,23 +325,71 @@ class JichangRepository(private val dao: SnapshotDao) {
         profiles = state.profiles.map { profile -> profile.copy(
             enabledNodeIds = profile.enabledNodeIds - nodeId,
             regionOverrides = profile.regionOverrides - nodeId,
-            ruleProfile = profile.ruleProfile.copy(groups = profile.ruleProfile.groups.map { group -> group.copy(members = group.members - "node:$nodeId") }),
+            ruleProfile = profile.ruleProfile.copy(groups = profile.ruleProfile.groups.map { group ->
+                if ("node:$nodeId" in group.members) group.copy(members = group.members - "node:$nodeId", membersExplicit = true) else group
+            }),
         ) },
     ) }
 
-    suspend fun addGroup(name: String, type: String, members: List<String>) = updateProfile { ruleProfile(it).let { rules ->
+    suspend fun addGroup(
+        name: String,
+        type: String,
+        members: List<String>,
+        ruleIndices: Set<Int> = emptySet(),
+        providerIds: Set<String> = emptySet(),
+    ) = updateProfile { profile ->
+        val rules = profile.ruleProfile
         require(name.isNotBlank()) { "请输入策略组名称" }
         require(rules.groups.none { group -> group.name == name.trim() }) { "策略组名称已存在" }
         require(type in setOf("select", "url-test", "fallback", "load-balance", "ssid", "smart")) { "策略组类型无效" }
-        it.copy(ruleProfile = rules.copy(groups = rules.groups + PolicyGroup(name.trim(), type, members)))
-    } }
+        val cleanName = name.trim()
+        val effectiveNodes = mutableState.value.nodes.filter { node ->
+            (node.sourceId == null || node.sourceId in profile.selectedSourceIds) && node.id in profile.enabledNodeIds
+        }.map { "node:${it.id}" }.toSet()
+        val validMembers = effectiveNodes + rules.groups.map { it.name } + setOf("DIRECT", "REJECT")
+        require(members.all { it in validMembers && it != cleanName }) { "策略组成员包含无效节点或策略组" }
+        require(ruleIndices.all { it in rules.rules.indices && !rules.rules[it].type.equals("MATCH", true) }) { "所选规则已发生变化，请重新选择" }
+        val selectedProviders = rules.providers.filter { it.id in providerIds }
+        require(selectedProviders.size == providerIds.size) { "所选规则集已不存在，请重新选择" }
+        val targetRules = rules.rules.mapIndexed { index, rule ->
+            if (index in ruleIndices) rule.copy(group = cleanName) else rule
+        }.toMutableList()
+        selectedProviders.forEach { provider ->
+            val matching = targetRules.indices.filter { index ->
+                targetRules[index].type.equals("RULE-SET", true) && targetRules[index].value == provider.name
+            }
+            if (matching.isEmpty()) targetRules += RoutingRule("RULE-SET", provider.name, cleanName)
+            else matching.forEach { index -> targetRules[index] = targetRules[index].copy(group = cleanName) }
+        }
+        val fallback = targetRules.lastOrNull { it.type.equals("MATCH", true) }
+        targetRules.removeAll { it.type.equals("MATCH", true) }
+        fallback?.let(targetRules::add)
+        val newGroups = rules.groups + PolicyGroup(cleanName, type, members.distinct(), membersExplicit = true)
+        requireAcyclicGroups(newGroups)
+        profile.copy(ruleProfile = rules.copy(
+            groups = newGroups,
+            rules = targetRules,
+        ))
+    }
 
     suspend fun updateGroup(oldName: String, name: String, type: String, members: List<String>) = updateProfile { profile ->
         val rules = profile.ruleProfile
         require(name.isNotBlank()) { "请输入策略组名称" }
         require(rules.groups.none { it.name == name.trim() && it.name != oldName }) { "策略组名称已存在" }
         require(type in setOf("select", "url-test", "fallback", "load-balance", "ssid", "smart")) { "策略组类型无效" }
-        val newGroups = rules.groups.map { if (it.name == oldName) it.copy(name = name.trim(), type = type, members = members) else it }
+        val effectiveNodes = mutableState.value.nodes.filter { node ->
+            (node.sourceId == null || node.sourceId in profile.selectedSourceIds) && node.id in profile.enabledNodeIds
+        }.map { "node:${it.id}" }.toSet()
+        val validMembers = effectiveNodes + rules.groups.filterNot { it.name == oldName }.map { it.name } + setOf("DIRECT", "REJECT")
+        require(members.all { it in validMembers && it != name.trim() }) { "策略组成员包含无效节点或策略组" }
+        val newGroups = rules.groups.map { group ->
+            when {
+                group.name == oldName -> group.copy(name = name.trim(), type = type, members = members.distinct(), membersExplicit = true)
+                oldName in group.members -> group.copy(members = group.members.map { if (it == oldName) name.trim() else it })
+                else -> group
+            }
+        }
+        requireAcyclicGroups(newGroups)
         val renamedRules = rules.rules.map { if (it.group == oldName) it.copy(group = name.trim()) else it }
         val renamedSubRules = rules.subRules.map { sub -> sub.copy(rules = sub.rules.map { if (it.group == oldName) it.copy(group = name.trim()) else it }) }
         profile.copy(ruleProfile = rules.copy(groups = newGroups, rules = renamedRules, subRules = renamedSubRules))
@@ -387,7 +398,9 @@ class JichangRepository(private val dao: SnapshotDao) {
     suspend fun removeGroup(name: String) = updateProfile { profile ->
         val rules = profile.ruleProfile
         if (rules.groups.size <= 1) error("至少保留一个策略组")
-        val groups = rules.groups.filterNot { it.name == name }
+        val groups = rules.groups.filterNot { it.name == name }.map { group ->
+            if (name in group.members) group.copy(members = group.members - name, membersExplicit = true) else group
+        }
         val fallback = groups.first().name
         val reassignedRules = rules.rules.map { if (it.group == name) it.copy(group = fallback) else it }
         val reassignedSubRules = rules.subRules.map { sub -> sub.copy(rules = sub.rules.map { if (it.group == name) it.copy(group = fallback) else it }) }
@@ -448,6 +461,21 @@ class JichangRepository(private val dao: SnapshotDao) {
         profile.copy(ruleProfile = profile.ruleProfile.copy(rules = profile.ruleProfile.rules.filterIndexed { index, _ -> index !in indices }))
     }
 
+    suspend fun changeRuleTargets(indices: Set<Int>, target: String) = updateProfile { profile ->
+        require(target in profile.ruleProfile.groups.map { it.name } + setOf("DIRECT", "REJECT")) { "请选择有效的策略目标" }
+        val rules = profile.ruleProfile.rules.mapIndexed { index, rule -> if (index in indices && !rule.type.equals("MATCH", true)) rule.copy(group = target) else rule }
+        profile.copy(ruleProfile = profile.ruleProfile.copy(rules = rules))
+    }
+
+    suspend fun duplicateRule(index: Int) = updateProfile { profile ->
+        require(index in profile.ruleProfile.rules.indices) { "规则已不存在" }
+        val source = profile.ruleProfile.rules[index]
+        require(!source.type.equals("MATCH", true)) { "MATCH 兜底规则不能复制" }
+        val rules = profile.ruleProfile.rules.toMutableList()
+        rules.add(index + 1, source.copy())
+        profile.copy(ruleProfile = profile.ruleProfile.copy(rules = rules))
+    }
+
     suspend fun saveRuleProfile(profile: RuleProfile) = updateProfile { it.copy(ruleProfile = profile) }
 
     suspend fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = updateProfile { profile ->
@@ -459,6 +487,21 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     private fun ruleProfile(profile: ConfigProfile) = profile.ruleProfile
+
+    private fun requireAcyclicGroups(groups: List<PolicyGroup>) {
+        val names = groups.map { it.name }.toSet()
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+        fun visit(name: String) {
+            if (name in visited) return
+            require(name !in visiting) { "策略组成员不能形成循环引用" }
+            visiting += name
+            groups.firstOrNull { it.name == name }?.members?.filter { it in names }?.forEach(::visit)
+            visiting -= name
+            visited += name
+        }
+        names.forEach(::visit)
+    }
 
     private suspend fun updateProfile(transform: (ConfigProfile) -> ConfigProfile) = update { state ->
         state.copy(profiles = state.profiles.map { if (it.id == state.activeProfileId) transform(it) else it })
