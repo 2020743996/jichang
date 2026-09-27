@@ -103,12 +103,20 @@ data class ConfigTemplate(
     val createdAt: Long = System.currentTimeMillis(),
 )
 
+data class RuleRecipe(
+    val id: String,
+    val name: String,
+    val rules: List<RoutingRule> = emptyList(),
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
 data class AppState(
     val sources: List<SubscriptionSource> = emptyList(),
     val nodes: List<ProxyNode> = emptyList(),
     val profiles: List<ConfigProfile> = listOf(ConfigProfile("default", "默认配置")),
     val activeProfileId: String = "default",
     val templates: List<ConfigTemplate> = emptyList(),
+    val ruleRecipes: List<RuleRecipe> = emptyList(),
 ) {
     val activeProfile: ConfigProfile
         get() = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull() ?: ConfigProfile("default", "默认配置")

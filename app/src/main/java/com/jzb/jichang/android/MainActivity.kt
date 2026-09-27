@@ -69,6 +69,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -146,12 +147,14 @@ import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.model.RuleRecipe
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.MihomoTemplateParser
 import com.jzb.jichang.android.service.TemplateSubscriptionParameter
 import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.NodeAutoGroups
+import com.jzb.jichang.android.service.RuleDiagnostics
 import com.jzb.jichang.android.service.RemoteConfigDownloader
 import com.jzb.jichang.android.service.LanShareQrCode
 import com.jzb.jichang.android.share.LocalShareController
@@ -237,6 +240,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var resourceTab by remember { mutableStateOf(ResourceTab.Sources) }
     var configTab by remember { mutableStateOf(ConfigTab.Rules) }
     var dialog by remember { mutableStateOf<DialogKind?>(null) }
+    var showRuleRecipes by remember { mutableStateOf(false) }
     var editingGroup by remember { mutableStateOf<PolicyGroup?>(null) }
     var editingRule by remember { mutableStateOf<Pair<Int, com.jzb.jichang.android.model.RoutingRule>?>(null) }
     var createProfileFromCurrent by remember { mutableStateOf(true) }
@@ -507,6 +511,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
                                 templateBindings = profile.templateProviderBindings,
+                                ruleIssues = RuleDiagnostics.inspect(profile.ruleProfile),
                                 hasRegionalProxyGroups = parsedTemplate?.hasRegionalProxyGroups == true,
                                 onTemplateBinding = viewModel::bindTemplateProvider,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
@@ -559,7 +564,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             if (existing == null) viewModel.addGroup(name, type, members) else viewModel.updateGroup(existing.name, name, type, members)
             dialog = null; editingGroup = null
         })
-        DialogKind.Rule -> RuleDialog(state, editingRule, onDismiss = { dialog = null; editingRule = null }, onSave = { index, rule ->
+        DialogKind.Rule -> RuleDialog(state, editingRule, onDismiss = { dialog = null; editingRule = null }, onOpenRecipes = { dialog = null; editingRule = null; showRuleRecipes = true }, onSave = { index, rule ->
             if (index == null) viewModel.addRule(rule) else viewModel.updateRule(index, rule)
             dialog = null; editingRule = null
         })
@@ -571,6 +576,15 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         }, onSave = { id, name, fileName -> viewModel.updateProfile(id, name, fileName); dialog = null })
         null -> Unit
     }
+
+    if (showRuleRecipes) RuleRecipesDialog(
+        state = state,
+        onDismiss = { showRuleRecipes = false },
+        onSave = { name -> viewModel.saveRuleRecipe(name, state.ruleProfile.rules) },
+        onRename = viewModel::renameRuleRecipe,
+        onDelete = viewModel::deleteRuleRecipe,
+        onApply = viewModel::applyRuleRecipe,
+    )
 
     if (showExportSetup) ExportSetupDialog(
         state = state,
@@ -944,8 +958,16 @@ private fun RulesPage(
     var section by remember { mutableStateOf(0) }
     var query by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("全部类型") }
+    var strategy by remember { mutableStateOf("全部策略") }
+    var selecting by remember { mutableStateOf(false) }
+    var selectedRules by remember { mutableStateOf(setOf<Int>()) }
+    var deleting by remember { mutableStateOf(false) }
+    var deletingIndex by remember { mutableStateOf<Int?>(null) }
+    var groupToDelete by remember { mutableStateOf<PolicyGroup?>(null) }
+    var showRecipes by remember { mutableStateOf(false) }
     val categories = listOf("全部类型", "域名", "IP 与地理", "端口与网络", "进程", "规则集", "逻辑与兜底")
     val lastMovableIndex = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type == "MATCH" }) 1 else 0
+    val issues = remember(state.ruleProfile) { RuleDiagnostics.inspect(state.ruleProfile) }
     Column(modifier) {
         SegmentedTabs(listOf("规则 ${state.ruleProfile.rules.size}", "策略组 ${state.ruleProfile.groups.size}", "规则集 ${state.ruleProfile.providers.size}"), section) { section = it }
         when (section) {
@@ -955,9 +977,31 @@ private fun RulesPage(
                     Spacer(Modifier.width(8.dp))
                     OutlinedButton(onClick = onAddRule) { Icon(Icons.Outlined.Add, null); Text("添加") }
                 }
-                ChoiceMenu("$category", categories, { category = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ChoiceMenu(category, categories, { category = it }, Modifier.weight(1f))
+                    ChoiceMenu(strategy, listOf("全部策略") + state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT"), { strategy = it }, Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { showRecipes = true }) { Text("场景配方") }
+                    TextButton(onClick = { selecting = !selecting; selectedRules = emptySet() }) { Text(if (selecting) "取消多选" else "多选") }
+                    if (selecting) {
+                        Text("已选 ${selectedRules.size} 条", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                        TextButton(enabled = selectedRules.isNotEmpty(), onClick = { deleting = true }) { Text("删除所选", color = MaterialTheme.colorScheme.error) }
+                    } else Spacer(Modifier.weight(1f))
+                    TextButton(enabled = state.ruleProfile.rules.isNotEmpty(), onClick = { showRecipes = true }) { Text("保存配方") }
+                }
+                if (issues.isNotEmpty()) {
+                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("发现 ${issues.size} 个规则问题", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                            issues.take(3).forEach { issue -> Text("${if (issue.index >= 0) "#${issue.index + 1} ${issue.rule.type}" else issue.rule.type.ifBlank { "配置" }}：${issue.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer) }
+                            if (issues.size > 3) Text("还有 ${issues.size - 3} 项，请检查对应规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                        }
+                    }
+                }
                 val filtered = state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
-                    val matchesText = query.isBlank() || listOf(rule.type, rule.value, rule.group).any { it.contains(query, true) }
+                    val matchesText = query.isBlank() || listOf(rule.type, rule.value, rule.group, rule.rawLine.orEmpty(), rule.extraParameters.joinToString(" ")).any { it.contains(query, true) }
+                    val matchesStrategy = strategy == "全部策略" || rule.group == strategy
                     val matchesCategory = when (category) {
                         "域名" -> rule.type.startsWith("DOMAIN") || rule.type == "GEOSITE"
                         "IP 与地理" -> rule.type.contains("IP") || rule.type.contains("GEO")
@@ -967,7 +1011,7 @@ private fun RulesPage(
                         "逻辑与兜底" -> rule.type in setOf("AND", "OR", "NOT", "MATCH")
                         else -> true
                     }
-                    matchesText && matchesCategory
+                    matchesText && matchesCategory && matchesStrategy
                 }
                 if (state.ruleProfile.rules.isEmpty()) {
                     EmptyCard("从第一条规则开始", "使用上方按钮选择匹配类型、内容和策略；MATCH 兜底会自动放在最后。")
@@ -979,9 +1023,12 @@ private fun RulesPage(
                         onEdit = { onEditRule(index, rule) },
                         onMoveUp = { viewModel.moveRule(index, -1) },
                         onMoveDown = { viewModel.moveRule(index, 1) },
-                        onDelete = { viewModel.removeRule(index) },
+                        onDelete = { deletingIndex = index },
                         canMoveUp = index > 0 && rule.type != "MATCH",
                         canMoveDown = index < lastMovableIndex && rule.type != "MATCH",
+                        selectable = selecting,
+                        checked = index in selectedRules,
+                        onCheckedChange = { checked -> selectedRules = if (checked) selectedRules + index else selectedRules - index },
                     ) }
                 }
             }
@@ -995,7 +1042,7 @@ private fun RulesPage(
                             Icon(Icons.Outlined.Hub, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) { Text(group.name, style = MaterialTheme.typography.titleSmall); Text("${group.type} · ${group.members.size} 个成员", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                             TextButton(onClick = { onEditGroup(group) }) { Text("编辑") }
-                            IconButton(onClick = { viewModel.removeGroup(group.name) }) { Icon(Icons.Outlined.Delete, "删除策略组") }
+                            IconButton(enabled = state.ruleProfile.groups.size > 1, onClick = { groupToDelete = group }) { Icon(Icons.Outlined.Delete, "删除策略组") }
                         } }
                     }
                 }
@@ -1013,17 +1060,48 @@ private fun RulesPage(
             }
         }
     }
+    if (deleting) JichangAlertDialog(
+        onDismissRequest = { deleting = false },
+        title = { Text("删除所选规则？") },
+        text = { Text("将从当前配置中删除 ${selectedRules.size} 条规则，此操作无法撤销。") },
+        confirmButton = { TextButton(onClick = { viewModel.removeRules(selectedRules); selectedRules = emptySet(); selecting = false; deleting = false }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { deleting = false }) { Text("取消") } },
+    )
+    deletingIndex?.let { index -> state.ruleProfile.rules.getOrNull(index)?.let { rule -> JichangAlertDialog(
+        onDismissRequest = { deletingIndex = null },
+        title = { Text("删除规则？") },
+        text = { Text("${rule.type} · ${ruleSummary(rule)} → ${rule.group}") },
+        confirmButton = { TextButton(onClick = { viewModel.removeRule(index); deletingIndex = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { deletingIndex = null }) { Text("取消") } },
+    ) } }
+    groupToDelete?.let { group -> JichangAlertDialog(
+        onDismissRequest = { groupToDelete = null },
+        title = { Text("删除策略组？") },
+        text = { Text("主规则和子规则中指向“${group.name}”的目标都会改为其他现有策略组。") },
+        confirmButton = { TextButton(onClick = { viewModel.removeGroup(group.name); groupToDelete = null }) { Text("删除") } },
+        dismissButton = { TextButton(onClick = { groupToDelete = null }) { Text("取消") } },
+    ) }
+    if (showRecipes) RuleRecipesDialog(
+        state = state,
+        onDismiss = { showRecipes = false },
+        onSave = { name -> viewModel.saveRuleRecipe(name, state.ruleProfile.rules) },
+        onRename = viewModel::renameRuleRecipe,
+        onDelete = viewModel::deleteRuleRecipe,
+        onApply = viewModel::applyRuleRecipe,
+    )
 }
 
 @Composable
-private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean) {
+private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean, selectable: Boolean, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Card(onClick = onEdit, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    Card(onClick = { if (!selectable) onEdit() }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (selectable) Checkbox(checked = checked, onCheckedChange = onCheckedChange)
             Column(Modifier.weight(1f)) {
                 Text(if (rule.type == "MATCH") "最终兜底 · MATCH" else rule.type, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Text(ruleSummary(rule), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-                Text("策略  ${rule.group}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val parameters = buildList { if (rule.noResolve) add("no-resolve"); if (rule.source) add("src"); addAll(rule.extraParameters) }
+                Text("策略  ${rule.group}${parameters.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · 参数 ", separator = ", ").orEmpty()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Box {
                 IconButton(onClick = { expanded = true }) { Icon(Icons.Outlined.MoreVert, "规则操作") }
@@ -1039,11 +1117,142 @@ private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> 
 }
 
 private fun ruleSummary(rule: RoutingRule): String = when (rule.type) {
-    "AND", "OR", "NOT" -> "${rule.conditions.size} 个条件"
+    "AND", "OR", "NOT" -> if (rule.conditions.isEmpty()) rule.rawLine ?: "未解析组合表达式" else "${rule.conditions.size} 个条件"
     "RULE-SET" -> "规则集 · ${rule.value}"
     "SUB-RULE" -> "子规则 · ${rule.value}"
     "MATCH" -> "其余所有流量"
     else -> rule.value
+}
+
+private fun starterRuleRecipe(proxyTarget: String): List<RoutingRule> = listOf(
+    RoutingRule("GEOSITE", "category-ads-all", "REJECT"),
+    RoutingRule("GEOSITE", "cn", "DIRECT"),
+    RoutingRule("GEOSITE", "geolocation-!cn", proxyTarget),
+    RoutingRule("MATCH", "MATCH", proxyTarget),
+)
+
+@Composable
+private fun RuleRecipesDialog(
+    state: AppState,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onDelete: (String) -> Unit,
+    onApply: (List<RoutingRule>) -> Unit,
+) {
+    var recipeName by remember { mutableStateOf("") }
+    var proxyTarget by remember { mutableStateOf(state.ruleProfile.groups.firstOrNull { it.name.equals("PROXY", true) }?.name ?: state.ruleProfile.groups.firstOrNull()?.name.orEmpty()) }
+    var preview by remember { mutableStateOf<Pair<List<RoutingRule>, Boolean>?>(null) }
+    var renaming by remember { mutableStateOf<RuleRecipe?>(null) }
+    var deleting by remember { mutableStateOf<RuleRecipe?>(null) }
+    JichangAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("场景配方") },
+        text = { Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("基础分流", style = MaterialTheme.typography.titleSmall)
+            Text("广告拦截、国内直连、非国内代理和最终兜底。先预览，再应用到当前配置。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (state.ruleProfile.groups.isEmpty()) Text("当前没有可用的代理策略组，请先创建策略组。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            else {
+                SelectField("代理目标", proxyTarget, state.ruleProfile.groups.map { it.name }) { proxyTarget = it }
+                OutlinedButton(onClick = { preview = starterRuleRecipe(proxyTarget) to true }, modifier = Modifier.fillMaxWidth()) { Text("预览基础分流") }
+            }
+            Text("我的配方", style = MaterialTheme.typography.titleSmall)
+            if (state.ruleRecipes.isEmpty()) Text("还没有保存的配方。可从当前规则保存一份，之后在其他配置中复用。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            state.ruleRecipes.forEach { recipe ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) { Text(recipe.name, fontWeight = FontWeight.Medium); Text("${recipe.rules.size} 条规则", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        TextButton(onClick = { preview = recipe.rules to false }) { Text("预览") }
+                        Box {
+                            var menu by remember(recipe.id) { mutableStateOf(false) }
+                            IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "配方操作") }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(text = { Text("重命名") }, onClick = { menu = false; renaming = recipe })
+                                DropdownMenuItem(text = { Text("删除") }, onClick = { menu = false; deleting = recipe })
+                            }
+                        }
+                    }
+                }
+            }
+            if (state.ruleProfile.rules.isNotEmpty()) {
+                Text("保存当前规则", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(recipeName, { recipeName = it }, modifier = Modifier.weight(1f), label = { Text("配方名称") }, singleLine = true)
+                    OutlinedButton(enabled = recipeName.isNotBlank(), onClick = { onSave(recipeName); recipeName = "" }) { Text("保存") }
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
+    preview?.let { (rules, isStarter) -> RuleRecipePreviewDialog(
+        state = state,
+        initialRules = rules,
+        canChooseProxy = isStarter,
+        proxyGroups = state.ruleProfile.groups.map { it.name },
+        initialTarget = proxyTarget,
+        onDismiss = { preview = null },
+        onApply = { onApply(it); preview = null; onDismiss() },
+    ) }
+    renaming?.let { recipe -> RuleRecipeRenameDialog(recipe.name, onDismiss = { renaming = null }, onSave = { name -> onRename(recipe.id, name); renaming = null }) }
+    deleting?.let { recipe -> JichangAlertDialog(
+        onDismissRequest = { deleting = null },
+        title = { Text("删除配方？") },
+        text = { Text("“${recipe.name}”将从本机配方库移除。已应用到配置中的规则不会改变。") },
+        confirmButton = { TextButton(onClick = { onDelete(recipe.id); deleting = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+    ) }
+}
+
+@Composable
+private fun RuleRecipePreviewDialog(
+    state: AppState,
+    initialRules: List<RoutingRule>,
+    canChooseProxy: Boolean,
+    proxyGroups: List<String>,
+    initialTarget: String,
+    onDismiss: () -> Unit,
+    onApply: (List<RoutingRule>) -> Unit,
+) {
+    var target by remember(initialRules) { mutableStateOf(initialTarget) }
+    val rules = remember(initialRules, target, canChooseProxy) { if (canChooseProxy) starterRuleRecipe(target) else initialRules }
+    val issues = remember(rules, state.ruleProfile) { RuleDiagnostics.inspect(state.ruleProfile.copy(rules = rules)) }
+    val duplicates = rules.count { rule ->
+        if (rule.type.equals("MATCH", true)) state.ruleProfile.rules.any { it.type.equals("MATCH", true) } else rule in state.ruleProfile.rules
+    }
+    JichangAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("预览配方") },
+        text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (canChooseProxy) SelectField("代理目标", target, proxyGroups) { target = it }
+            rules.forEachIndexed { index, rule ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                        Text("${index + 1}. ${rule.type} → ${rule.group}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(ruleSummary(rule), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            if (issues.isNotEmpty()) {
+                Text("配方有 ${issues.size} 个需要处理的问题：", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                issues.forEach { issue -> Text("${issue.rule.type}：${issue.message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+            Text("将新增 ${rules.size - duplicates} 条，跳过重复 $duplicates 条。已有规则和 MATCH 兜底会保留。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } },
+        confirmButton = { TextButton(enabled = issues.isEmpty(), onClick = { onApply(rules) }) { Text("应用配方") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("返回") } },
+    )
+}
+
+@Composable
+private fun RuleRecipeRenameDialog(initialName: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember(initialName) { mutableStateOf(initialName) }
+    JichangAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名配方") },
+        text = { OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("配方名称") }, singleLine = true) },
+        confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -1060,6 +1269,7 @@ private fun ExportPage(
     unresolvedTemplateProviders: List<String>,
     templateParameters: List<TemplateSubscriptionParameter>,
     templateBindings: Map<String, String>,
+    ruleIssues: List<com.jzb.jichang.android.service.RuleIssue>,
     hasRegionalProxyGroups: Boolean,
     onTemplateBinding: (String, String?) -> Unit,
     onModeChange: (ConfigSourceMode) -> Unit,
@@ -1080,6 +1290,13 @@ private fun ExportPage(
             }
         }
         Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        if (ruleIssues.isNotEmpty()) Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("规则校验：${ruleIssues.size} 个问题", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                ruleIssues.forEach { issue -> Text("${if (issue.index >= 0) "#${issue.index + 1} ${issue.rule.type}" else issue.rule.type.ifBlank { "配置" }}：${issue.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer) }
+                Text("请返回规则页修正后再下载或分享。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1122,13 +1339,13 @@ private fun ExportPage(
             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty() && ruleIssues.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text("下载配置", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
-            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty() && ruleIssues.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
@@ -1462,7 +1679,7 @@ private fun GroupDialog(state: AppState, initial: PolicyGroup?, onDismiss: () ->
     }
     JichangAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加策略组") },
+        title = { Text(if (initial == null) "新建策略组" else "编辑策略组") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
             Box {
@@ -1505,7 +1722,7 @@ private val visualRuleTypes = listOf(
 )
 
 @Composable
-private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDismiss: () -> Unit, onSave: (Int?, RoutingRule) -> Unit) {
+private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDismiss: () -> Unit, onOpenRecipes: () -> Unit, onSave: (Int?, RoutingRule) -> Unit) {
     val existing = initial?.second
     var type by remember(initial) { mutableStateOf(existing?.type ?: "DOMAIN-SUFFIX") }
     var value by remember(initial) { mutableStateOf(existing?.value.orEmpty()) }
@@ -1513,26 +1730,25 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
     var noResolve by remember(initial) { mutableStateOf(existing?.noResolve ?: false) }
     var source by remember(initial) { mutableStateOf(existing?.source ?: false) }
     var conditions by remember(initial) { mutableStateOf(existing?.conditions ?: emptyList()) }
+    var extraParameters by remember(initial) { mutableStateOf(existing?.extraParameters.orEmpty().joinToString("\n")) }
+    var rawLine by remember(initial) { mutableStateOf(existing?.rawLine.orEmpty()) }
+    var advanced by remember(initial) { mutableStateOf(existing?.extraParameters.orEmpty().isNotEmpty() || !existing?.rawLine.isNullOrBlank()) }
     var showTypePicker by remember { mutableStateOf(false) }
     var strategyMenu by remember { mutableStateOf(false) }
     var geositeSearch by remember { mutableStateOf("") }
     val composite = type in setOf("AND", "OR", "NOT")
     val valueRequired = type !in setOf("MATCH", "AND", "OR", "NOT")
-    val valid = (!valueRequired || value.isNotBlank()) && (!composite || conditions.size >= if (type == "NOT") 1 else 2)
+    val minimumConditions = if (type == "NOT") 1 else 2
+    val valid = (!valueRequired || value.isNotBlank()) && (!composite || conditions.size >= minimumConditions || rawLine.isNotBlank())
     JichangAlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier.fillMaxWidth(0.96f).widthIn(max = 620.dp),
         properties = DialogProperties(usePlatformDefaultWidth = false),
         title = { Text(if (initial == null) "新建路由规则" else "编辑路由规则") },
         text = { Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            TextButton(onClick = onOpenRecipes, modifier = Modifier.fillMaxWidth()) { Text("打开场景配方与我的配方") }
             Text("规则类型", style = MaterialTheme.typography.labelLarge)
             OutlinedButton(onClick = { showTypePicker = true }, modifier = Modifier.fillMaxWidth()) { Text(if (type == "MATCH") "MATCH · 最终兜底" else type) }
-            Text("常用模板", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "google.com"; group = state.ruleProfile.groups.firstOrNull()?.name ?: "PROXY" }, label = { Text("Google 走代理") })
-                AssistChip(onClick = { type = "DOMAIN-SUFFIX"; value = "apple.com"; group = "DIRECT" }, label = { Text("Apple 直连") })
-                AssistChip(onClick = { type = "GEOSITE"; value = "category-ads-all"; group = "REJECT" }, label = { Text("屏蔽广告") })
-            }
             when {
                 type == "MATCH" -> Text("MATCH 会被固定在规则列表末尾。", style = MaterialTheme.typography.bodySmall)
                 composite -> {
@@ -1541,6 +1757,7 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
                         ConditionEditor(condition, state.ruleProfile.providers.map { it.name }, onChange = { changed -> conditions = conditions.toMutableList().also { it[index] = changed } }, onDelete = { conditions = conditions.filterIndexed { i, _ -> i != index } })
                     }
                     OutlinedButton(onClick = { conditions = conditions + RuleCondition(type = "DOMAIN-SUFFIX", value = "example.com") }, modifier = Modifier.fillMaxWidth()) { Text("添加子条件") }
+                    if (advanced || rawLine.isNotBlank()) OutlinedTextField(rawLine, { rawLine = it }, modifier = Modifier.fillMaxWidth(), label = { Text("原始组合规则（用于保留无法解析的导入表达式）") }, minLines = 2)
                 }
                 type == "RULE-SET" -> {
                     SelectField("规则集", value, state.ruleProfile.providers.map { it.name }, { value = it })
@@ -1569,15 +1786,22 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
                 Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(noResolve, { noResolve = it }); Text("no-resolve") }
                 if (type in setOf("IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "GEOIP")) Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(source, { source = it }); Text("按来源地址匹配 (src)") }
             }
+            TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起高级参数" else "高级参数") }
+            if (advanced) OutlinedTextField(extraParameters, { extraParameters = it }, modifier = Modifier.fillMaxWidth(), label = { Text("附加参数，每行一项") }, placeholder = { Text("例如：domain-suffix") }, minLines = 2)
         } },
-        confirmButton = { TextButton(enabled = valid, onClick = { onSave(initial?.first, RoutingRule(type, value, group, noResolve, source, conditions)) }) { Text(if (initial == null) "添加规则" else "保存") } },
+        confirmButton = { TextButton(enabled = valid, onClick = { onSave(initial?.first, RoutingRule(type, value, group, noResolve, source, conditions, extraParameters.lines().map(String::trim).filter(String::isNotBlank), rawLine.takeIf(String::isNotBlank))) }) { Text(if (initial == null) "添加规则" else "保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
     if (showTypePicker) RuleTypePickerDialog(type, onDismiss = { showTypePicker = false }, onSelect = { selected ->
+        val previous = type
         type = selected
+        if (previous in setOf("AND", "OR", "NOT") && selected !in setOf("AND", "OR", "NOT")) {
+            conditions = emptyList()
+            rawLine = ""
+        }
         if (selected == "MATCH") value = ""
-        if (selected == "RULE-SET" && value.isBlank()) value = state.ruleProfile.providers.firstOrNull()?.name.orEmpty()
-        if (selected == "SUB-RULE" && value.isBlank()) value = state.ruleProfile.subRules.firstOrNull()?.name.orEmpty()
+        if (selected == "RULE-SET") value = state.ruleProfile.providers.firstOrNull()?.name.orEmpty()
+        if (selected == "SUB-RULE") value = state.ruleProfile.subRules.firstOrNull()?.name.orEmpty()
         showTypePicker = false
     })
 }
@@ -1692,6 +1916,11 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
     var editing by remember { mutableStateOf<RuleProvider?>(null) }
     var editingSubRule by remember { mutableStateOf<Pair<String, Int?>?>(null) }
     var subName by remember { mutableStateOf("") }
+    var providerToDelete by remember { mutableStateOf<RuleProvider?>(null) }
+    var subRuleToDelete by remember { mutableStateOf<String?>(null) }
+    val invalidProviderSetup = profile.providers.any { it.name.isBlank() || (it.type == "http" && !it.url.startsWith("http")) || (it.type == "inline" && it.payload.isEmpty()) } ||
+        profile.providers.map { it.name.lowercase() }.toSet().size != profile.providers.size ||
+        profile.subRules.any { it.name.isBlank() } || profile.subRules.map { it.name.lowercase() }.toSet().size != profile.subRules.size
     if (editing != null) {
         RuleProviderEditor(editing!!, onDismiss = { editing = null }, onSave = { item ->
             val old = providers.indexOfFirst { it.id == editing?.id }
@@ -1703,7 +1932,7 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
         val (subNameKey, index) = editingSubRule!!
         val subRule = profile.subRules.first { it.name == subNameKey }
         val nestedState = AppState(profiles = listOf(ConfigProfile("nested", "nested", ruleProfile = profile)))
-        RuleDialog(nestedState, index?.let { it to subRule.rules[it] }, onDismiss = { editingSubRule = null }, onSave = { position, rule ->
+        RuleDialog(nestedState, index?.let { it to subRule.rules[it] }, onDismiss = { editingSubRule = null }, onOpenRecipes = { }, onSave = { position, rule ->
             val updatedRules = subRule.rules.toMutableList()
             if (position == null) updatedRules += rule else updatedRules[position] = rule
             profile = profile.copy(subRules = profile.subRules.map { if (it.name == subNameKey) it.copy(rules = updatedRules) else it })
@@ -1712,7 +1941,7 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
     } else JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("规则集与子规则") },
         text = { Column(Modifier.height(440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("规则集提供者", style = MaterialTheme.typography.titleSmall)
-            providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { profile = profile.copy(providers = providers - provider) }) { Icon(Icons.Outlined.Delete, null) } } } }
+            providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { providerToDelete = provider }) { Icon(Icons.Outlined.Delete, "删除规则集提供者") } } } }
             OutlinedButton(onClick = { editing = RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集") }, modifier = Modifier.fillMaxWidth()) { Text("添加规则集提供者") }
             Text("本地子规则", style = MaterialTheme.typography.titleSmall)
             profile.subRules.forEach { rule ->
@@ -1720,15 +1949,36 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) { Text(rule.name); Text("${rule.rules.size} 条规则", style = MaterialTheme.typography.labelSmall) }
                         TextButton(onClick = { editingSubRule = rule.name to null }) { Text("添加规则") }
-                        IconButton(onClick = { profile = profile.copy(subRules = profile.subRules - rule) }) { Icon(Icons.Outlined.Delete, "删除子规则") }
+                        IconButton(onClick = { subRuleToDelete = rule.name }) { Icon(Icons.Outlined.Delete, "删除子规则") }
                     }
                     rule.rules.forEachIndexed { index, item -> TextButton(onClick = { editingSubRule = rule.name to index }) { Text("${item.type} · ${item.value} → ${item.group}") } }
                 } }
             }
             Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(subName, { subName = it }, Modifier.weight(1f), label = { Text("新子规则名称") }, singleLine = true); TextButton(enabled = subName.isNotBlank() && profile.subRules.none { it.name == subName.trim() }, onClick = { profile = profile.copy(subRules = profile.subRules + SubRuleProfile(subName.trim())); subName = "" }) { Text("添加") } }
             Text("规则集文件、子规则由接收端 Mihomo 根据此配置读取。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (invalidProviderSetup) Text("请检查提供者与子规则名称、HTTP 地址及内嵌内容。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         } },
-        confirmButton = { TextButton(onClick = { onSave(profile) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+        confirmButton = { TextButton(enabled = !invalidProviderSetup, onClick = { onSave(profile) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    providerToDelete?.let { provider ->
+        val references = profile.rules.count { it.type == "RULE-SET" && it.value == provider.name } + profile.subRules.sumOf { sub -> sub.rules.count { it.type == "RULE-SET" && it.value == provider.name } }
+        JichangAlertDialog(
+            onDismissRequest = { providerToDelete = null },
+            title = { Text("删除规则集提供者？") },
+            text = { Text(if (references == 0) "“${provider.name}”将从当前配置移除。" else "有 $references 条规则引用“${provider.name}”。删除后这些引用会显示为校验错误。") },
+            confirmButton = { TextButton(onClick = { profile = profile.copy(providers = profile.providers.filterNot { it.id == provider.id }); providerToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { providerToDelete = null }) { Text("取消") } },
+        )
+    }
+    subRuleToDelete?.let { name ->
+        val references = profile.rules.count { it.type == "SUB-RULE" && it.value == name }
+        JichangAlertDialog(
+            onDismissRequest = { subRuleToDelete = null },
+            title = { Text("删除子规则？") },
+            text = { Text(if (references == 0) "“$name”及其中 ${profile.subRules.firstOrNull { it.name == name }?.rules?.size ?: 0} 条规则将被删除。" else "$references 条规则正在引用“$name”，删除后这些引用会显示为校验错误。") },
+            confirmButton = { TextButton(onClick = { profile = profile.copy(subRules = profile.subRules.filterNot { it.name == name }); subRuleToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { subRuleToDelete = null }) { Text("取消") } },
+        )
+    }
 }
 
 @Composable

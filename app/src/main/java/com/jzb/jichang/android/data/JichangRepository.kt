@@ -14,6 +14,7 @@ import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.model.SubscriptionSource
 import com.jzb.jichang.android.model.RuleProvider
+import com.jzb.jichang.android.model.RuleRecipe
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.SubscriptionParser
@@ -81,7 +82,10 @@ class JichangRepository(private val dao: SnapshotDao) {
             val profiles = gson.fromJson<List<ConfigProfile>>(profilesJson, object : TypeToken<List<ConfigProfile>>() {}.type)
                 .map { it.copy(templateProviderBindings = it.templateProviderBindings.orEmpty()) }
             val activeId = json.get("activeProfileId")?.asString?.takeIf { id -> profiles.any { it.id == id } } ?: profiles.first().id
-            return AppState(sources, nodes, profiles, activeId, templates)
+            val ruleRecipes = json.getAsJsonArray("ruleRecipes")?.let {
+                gson.fromJson<List<RuleRecipe>>(it, object : TypeToken<List<RuleRecipe>>() {}.type)
+            }.orEmpty()
+            return AppState(sources, nodes, profiles, activeId, templates, ruleRecipes)
         }
 
         // Version-1 stored one global rule profile and global enabled flags on resources.
@@ -134,6 +138,53 @@ class JichangRepository(private val dao: SnapshotDao) {
     suspend fun deleteTemplate(templateId: String) = update { state ->
         require(state.profiles.none { it.templateId == templateId }) { "有配置正在使用此模板，请先删除相关配置" }
         state.copy(templates = state.templates.filterNot { it.id == templateId })
+    }
+
+    suspend fun saveRuleRecipe(name: String, rules: List<RoutingRule>): String = update { state ->
+        val cleanName = name.trim()
+        require(cleanName.isNotBlank()) { "请输入配方名称" }
+        require(state.ruleRecipes.none { it.name.equals(cleanName, true) }) { "配方名称已存在" }
+        require(rules.isNotEmpty()) { "当前没有可保存的规则" }
+        state.copy(ruleRecipes = state.ruleRecipes + RuleRecipe(UUID.randomUUID().toString(), cleanName, rules.toList()))
+    }.ruleRecipes.last().id
+
+    suspend fun renameRuleRecipe(id: String, name: String) = update { state ->
+        val cleanName = name.trim()
+        require(cleanName.isNotBlank()) { "请输入配方名称" }
+        require(state.ruleRecipes.any { it.id == id }) { "配方不存在" }
+        require(state.ruleRecipes.none { it.id != id && it.name.equals(cleanName, true) }) { "配方名称已存在" }
+        state.copy(ruleRecipes = state.ruleRecipes.map { if (it.id == id) it.copy(name = cleanName) else it })
+    }
+
+    suspend fun deleteRuleRecipe(id: String) = update { state ->
+        require(state.ruleRecipes.any { it.id == id }) { "配方不存在" }
+        state.copy(ruleRecipes = state.ruleRecipes.filterNot { it.id == id })
+    }
+
+    suspend fun applyRuleRecipe(rules: List<RoutingRule>): Pair<Int, Int> {
+        var result = 0 to 0
+        updateProfile { profile ->
+            val merged = profile.ruleProfile.rules.toMutableList()
+            var added = 0
+            var skipped = 0
+            rules.forEach { rule ->
+                val duplicate = if (rule.type.equals("MATCH", true)) {
+                    merged.any { it.type.equals("MATCH", true) }
+                } else rule in merged
+                if (duplicate) skipped++ else {
+                    validateRule(rule, profile.ruleProfile)
+                    if (rule.type.equals("MATCH", true)) merged.removeAll { it.type.equals("MATCH", true) }
+                    merged += rule
+                    added++
+                }
+            }
+            val fallback = merged.lastOrNull { it.type.equals("MATCH", true) }
+            merged.removeAll { it.type.equals("MATCH", true) }
+            fallback?.let(merged::add)
+            result = added to skipped
+            profile.copy(ruleProfile = profile.ruleProfile.copy(rules = merged))
+        }
+        return result
     }
 
     suspend fun createProfileFromTemplate(name: String, fileName: String, templateId: String): String = update { state ->
@@ -328,7 +379,9 @@ class JichangRepository(private val dao: SnapshotDao) {
         require(rules.groups.none { it.name == name.trim() && it.name != oldName }) { "策略组名称已存在" }
         require(type in setOf("select", "url-test", "fallback", "load-balance", "ssid", "smart")) { "策略组类型无效" }
         val newGroups = rules.groups.map { if (it.name == oldName) it.copy(name = name.trim(), type = type, members = members) else it }
-        profile.copy(ruleProfile = rules.copy(groups = newGroups, rules = rules.rules.map { if (it.group == oldName) it.copy(group = name.trim()) else it }))
+        val renamedRules = rules.rules.map { if (it.group == oldName) it.copy(group = name.trim()) else it }
+        val renamedSubRules = rules.subRules.map { sub -> sub.copy(rules = sub.rules.map { if (it.group == oldName) it.copy(group = name.trim()) else it }) }
+        profile.copy(ruleProfile = rules.copy(groups = newGroups, rules = renamedRules, subRules = renamedSubRules))
     }
 
     suspend fun removeGroup(name: String) = updateProfile { profile ->
@@ -336,12 +389,16 @@ class JichangRepository(private val dao: SnapshotDao) {
         if (rules.groups.size <= 1) error("至少保留一个策略组")
         val groups = rules.groups.filterNot { it.name == name }
         val fallback = groups.first().name
-        profile.copy(ruleProfile = rules.copy(groups = groups, rules = rules.rules.map { if (it.group == name) it.copy(group = fallback) else it }))
+        val reassignedRules = rules.rules.map { if (it.group == name) it.copy(group = fallback) else it }
+        val reassignedSubRules = rules.subRules.map { sub -> sub.copy(rules = sub.rules.map { if (it.group == name) it.copy(group = fallback) else it }) }
+        profile.copy(ruleProfile = rules.copy(groups = groups, rules = reassignedRules, subRules = reassignedSubRules))
     }
 
     suspend fun addRule(rule: RoutingRule) = updateProfile { profile ->
         validateRule(rule, profile.ruleProfile)
-        val rules = if (rule.type.equals("MATCH", true)) profile.ruleProfile.rules.filterNot { it.type.equals("MATCH", true) } + rule else profile.ruleProfile.rules + rule
+        val fallback = profile.ruleProfile.rules.lastOrNull { it.type.equals("MATCH", true) }
+        val rules = if (rule.type.equals("MATCH", true)) profile.ruleProfile.rules.filterNot { it.type.equals("MATCH", true) } + rule
+        else profile.ruleProfile.rules.filterNot { it.type.equals("MATCH", true) } + rule + listOfNotNull(fallback)
         profile.copy(ruleProfile = profile.ruleProfile.copy(rules = rules))
     }
 
@@ -359,11 +416,18 @@ class JichangRepository(private val dao: SnapshotDao) {
 
     private fun validateRule(rule: RoutingRule, profile: RuleProfile) {
         require(rule.type.uppercase() in MihomoConfigGenerator.supportedRuleTypes) { "规则类型无效" }
-        require(rule.type.equals("MATCH", true) || rule.value.isNotBlank() || rule.conditions.isNotEmpty()) { "请输入匹配内容" }
+        val composite = rule.type.uppercase() in setOf("AND", "OR", "NOT")
+        require(rule.type.equals("MATCH", true) || rule.value.isNotBlank() || rule.conditions.isNotEmpty() || (composite && !rule.rawLine.isNullOrBlank())) { "请输入匹配内容" }
         require(rule.group in profile.groups.map { it.name } || rule.group in setOf("DIRECT", "REJECT")) { "请选择有效的策略组" }
         require(rule.value.none { it == '\n' || it == '\r' }) { "匹配内容不能包含换行" }
+        require(rule.type.uppercase() in setOf("MATCH", "AND", "OR", "NOT") || ',' !in rule.value) { "匹配内容不能包含逗号" }
         require(rule.type.uppercase() != "RULE-SET" || profile.providers.any { it.name == rule.value }) { "请先创建对应的规则集" }
-        if (rule.type.uppercase() in setOf("AND", "OR", "NOT")) require(rule.conditions.size >= if (rule.type.equals("NOT", true)) 1 else 2) { "组合规则的条件数量不足" }
+        require(rule.type.uppercase() != "SUB-RULE" || profile.subRules.any { it.name == rule.value }) { "请先创建对应的子规则" }
+        require(rule.extraParameters.none { it.isBlank() || it.contains(',') || it.contains('\n') || it.contains('\r') }) { "高级参数格式无效" }
+        require(rule.rawLine?.none { it == '\n' || it == '\r' } != false) { "原始规则不能包含换行" }
+        if (rule.type.uppercase() in setOf("AND", "OR", "NOT") && rule.conditions.size < if (rule.type.equals("NOT", true)) 1 else 2) {
+            require(!rule.rawLine.isNullOrBlank() && !rule.rawLine.contains('\n') && !rule.rawLine.contains('\r')) { "组合规则条件不足，且没有可保留的原始规则" }
+        }
     }
 
     suspend fun moveRule(index: Int, offset: Int) = updateProfile { profile ->
@@ -378,6 +442,10 @@ class JichangRepository(private val dao: SnapshotDao) {
 
     suspend fun removeRule(index: Int) = updateProfile { profile ->
         profile.copy(ruleProfile = profile.ruleProfile.copy(rules = profile.ruleProfile.rules.filterIndexed { i, _ -> i != index }))
+    }
+
+    suspend fun removeRules(indices: Set<Int>) = updateProfile { profile ->
+        profile.copy(ruleProfile = profile.ruleProfile.copy(rules = profile.ruleProfile.rules.filterIndexed { index, _ -> index !in indices }))
     }
 
     suspend fun saveRuleProfile(profile: RuleProfile) = updateProfile { it.copy(ruleProfile = profile) }

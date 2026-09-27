@@ -1,11 +1,15 @@
 package com.jzb.jichang.android
 
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.jzb.jichang.android.data.SnapshotDao
 import com.jzb.jichang.android.data.SnapshotEntity
 import com.jzb.jichang.android.data.JichangRepository
 import com.jzb.jichang.android.model.AppState
 import com.jzb.jichang.android.model.ProxyNode
+import com.jzb.jichang.android.model.RoutingRule
+import com.jzb.jichang.android.model.RuleProfile
+import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.SubscriptionSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -65,6 +69,75 @@ class SubscriptionRepositoryTest {
             repository.renameTemplate(templateId, "Tokyo template")
             repository.deleteTemplate(templateId)
             assertEquals(emptyList<Any>(), repository.state.value.templates)
+        } finally {
+            repository.close()
+        }
+    }
+
+    @Test fun ruleRecipesAreSharedAndApplyingSkipsDuplicatesAndKeepsMatchLast() = runBlocking {
+        val repository = JichangRepository(InMemorySnapshotDao())
+        delay(100)
+        val rules = listOf(
+            RoutingRule("GEOSITE", "category-ads-all", "REJECT"),
+            RoutingRule("GEOSITE", "cn", "DIRECT"),
+            RoutingRule("GEOSITE", "geolocation-!cn", "PROXY"),
+            RoutingRule("MATCH", "MATCH", "PROXY"),
+        )
+        try {
+            val id = repository.saveRuleRecipe("基础分流", rules)
+            repository.createProfile("第二份", "second", false)
+            assertEquals(4 to 0, repository.applyRuleRecipe(repository.state.value.ruleRecipes.single().rules))
+            assertEquals("MATCH", repository.state.value.ruleProfile.rules.last().type)
+            assertEquals(0 to 4, repository.applyRuleRecipe(repository.state.value.ruleRecipes.single().rules))
+            repository.renameRuleRecipe(id, "家庭分流")
+            assertEquals("家庭分流", repository.state.value.ruleRecipes.single().name)
+            repository.deleteRuleRecipe(id)
+            assertTrue(repository.state.value.ruleRecipes.isEmpty())
+        } finally {
+            repository.close()
+        }
+    }
+
+    @Test fun recipeWithMissingTargetIsRejectedWithoutChangingRules() = runBlocking {
+        val repository = JichangRepository(InMemorySnapshotDao())
+        delay(100)
+        try {
+            val before = repository.state.value.ruleProfile.rules
+            val result = runCatching { repository.applyRuleRecipe(listOf(RoutingRule("DOMAIN", "example.com", "MISSING"))) }
+            assertTrue(result.isFailure)
+            assertEquals(before, repository.state.value.ruleProfile.rules)
+        } finally {
+            repository.close()
+        }
+    }
+
+    @Test fun olderSnapshotsWithoutRecipeLibraryLoadWithAnEmptyLibrary() = runBlocking {
+        val legacy = JsonParser.parseString(Gson().toJson(AppState())).asJsonObject.apply { remove("ruleRecipes") }.toString()
+        val repository = JichangRepository(InMemorySnapshotDao(legacy))
+        delay(100)
+        try {
+            assertTrue(repository.state.value.ruleRecipes.isEmpty())
+        } finally {
+            repository.close()
+        }
+    }
+
+    @Test fun renamingAndDeletingStrategyGroupsUpdatesNestedRules() = runBlocking {
+        val repository = JichangRepository(InMemorySnapshotDao())
+        delay(100)
+        try {
+            repository.addGroup("BACKUP", "select", emptyList())
+            repository.saveRuleProfile(RuleProfile(
+                groups = listOf(com.jzb.jichang.android.model.PolicyGroup("PROXY"), com.jzb.jichang.android.model.PolicyGroup("BACKUP")),
+                rules = listOf(RoutingRule("DOMAIN", "example.com", "PROXY")),
+                subRules = listOf(SubRuleProfile("local", listOf(RoutingRule("DOMAIN", "local.test", "PROXY")))),
+            ))
+            repository.updateGroup("PROXY", "FAST", "select", emptyList())
+            assertEquals("FAST", repository.state.value.ruleProfile.rules.single().group)
+            assertEquals("FAST", repository.state.value.ruleProfile.subRules.single().rules.single().group)
+            repository.removeGroup("FAST")
+            assertEquals("BACKUP", repository.state.value.ruleProfile.rules.single().group)
+            assertEquals("BACKUP", repository.state.value.ruleProfile.subRules.single().rules.single().group)
         } finally {
             repository.close()
         }

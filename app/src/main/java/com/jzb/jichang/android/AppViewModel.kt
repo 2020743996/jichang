@@ -49,6 +49,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun renameTemplate(id: String, name: String) = run { repository.renameTemplate(id, name); "模板名称已更新" }
     fun deleteTemplate(id: String) = run { repository.deleteTemplate(id); "模板已删除" }
+    fun saveRuleRecipe(name: String, rules: List<RoutingRule>) = run { repository.saveRuleRecipe(name, rules); "规则配方已保存" }
+    fun renameRuleRecipe(id: String, name: String) = run { repository.renameRuleRecipe(id, name); "配方名称已更新" }
+    fun deleteRuleRecipe(id: String) = run { repository.deleteRuleRecipe(id); "规则配方已删除" }
+    fun applyRuleRecipe(rules: List<RoutingRule>) = run {
+        val (added, skipped) = repository.applyRuleRecipe(rules)
+        "配方已应用：新增 $added 条，跳过重复 $skipped 条"
+    }
     fun switchProfile(id: String) = run { repository.switchProfile(id); null }
     fun updateProfile(id: String, name: String, fileName: String) = run { repository.updateProfile(id, name, fileName); "配置已保存" }
     fun deleteProfile(id: String) = run { repository.deleteProfile(id); "配置已删除" }
@@ -103,6 +110,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateRule(index: Int, rule: RoutingRule) = run { repository.updateRule(index, rule); "规则已更新" }
     fun moveRule(index: Int, offset: Int) = run { repository.moveRule(index, offset); "规则顺序已更新" }
     fun removeRule(index: Int) = run { repository.removeRule(index); "规则已删除" }
+    fun removeRules(indices: Set<Int>) = run { repository.removeRules(indices); "已删除 ${indices.size} 条规则" }
     fun saveRuleProfile(profile: RuleProfile) = run { repository.saveRuleProfile(profile); "规则集配置已保存" }
     fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = run { repository.updateExportSettings(sourceMode, enabledRegions, regionOverrides); null }
     fun bindTemplateProvider(name: String, sourceId: String?) = run { repository.setTemplateProviderBinding(name, sourceId); "模板订阅绑定已更新" }
