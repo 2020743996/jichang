@@ -1143,7 +1143,7 @@ private fun ExportPage(
                 Text("局域网分享已开启", style = MaterialTheme.typography.titleSmall)
                 LanShareQrCodeCard(url)
                 SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
-                Text("接收设备需连接同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("接收设备需连接可互访的同一局域网。访客 Wi-Fi 或 VPN 可能阻断设备间连接。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onShareLink, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
                     TextButton(onClick = onStopShare) { Text("停止") }

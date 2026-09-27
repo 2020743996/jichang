@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -14,7 +16,6 @@ import com.jzb.jichang.android.MainActivity
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
 import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -49,7 +50,7 @@ class LocalShareService : Service() {
 
     fun startSharing(config: String, filename: String): String {
         stopSharing()
-        val address = findLanAddress() ?: error("没有找到局域网地址，请连接 Wi-Fi 或有线网络")
+        val address = findLanAddress() ?: error("没有检测到可用的 Wi-Fi 或有线局域网，请连接网络后重试")
         val tokenBytes = ByteArray(18).also(SecureRandom()::nextBytes)
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes)
         sharedConfig = config to filename
@@ -74,20 +75,28 @@ class LocalShareService : Service() {
         super.onDestroy()
     }
 
+    @Suppress("DEPRECATION")
     private fun findLanAddress(): String? = runCatching {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback }
-            .sortedBy { network ->
-                when {
-                    network.name.startsWith("wlan", true) -> 0
-                    network.name.startsWith("ap", true) -> 1
-                    network.name.startsWith("eth", true) || network.name.startsWith("en", true) -> 2
-                    else -> 3
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val activeNetwork = connectivity.activeNetwork
+        val networks = (listOfNotNull(activeNetwork) + connectivity.allNetworks.toList()).distinct()
+        networks.asSequence()
+            .mapNotNull { network ->
+                val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                val transportPriority = when {
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 0
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
+                    else -> return@mapNotNull null
                 }
+                val isActive = network == activeNetwork
+                val addresses = connectivity.getLinkProperties(network)?.linkAddresses.orEmpty()
+                    .mapNotNull { it.address as? Inet4Address }
+                    .filter { it.isSiteLocalAddress && !it.isLoopbackAddress }
+                addresses.firstOrNull()?.let { address -> Triple(transportPriority, isActive, address) }
             }
-            .flatMap { it.inetAddresses.toList() }
-            .filterIsInstance<Inet4Address>()
-            .firstOrNull { it.isSiteLocalAddress && !it.isLoopbackAddress }
+            .sortedWith(compareByDescending<Triple<Int, Boolean, Inet4Address>> { it.second }.thenBy { it.first })
+            .firstOrNull()
+            ?.third
             ?.hostAddress
     }.getOrNull()
 
