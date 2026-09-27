@@ -118,6 +118,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.Image
 import androidx.compose.ui.unit.dp
@@ -143,6 +145,8 @@ import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.service.MihomoTemplateParser
+import com.jzb.jichang.android.service.TemplateSubscriptionParameter
 import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.NodeAutoGroups
@@ -218,8 +222,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val shareController = remember { LocalShareController(context) }
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
+    val shareStats by shareController.transferStats.collectAsState()
     val generator = remember { MihomoConfigGenerator() }
     val profile = state.activeProfile
+    val parsedTemplate = remember(profile.templateId, state.templates) {
+        profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id }?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() } }
+    }
     val exportOptions = remember(profile) {
         ConfigExportOptions(
             sourceMode = runCatching { ConfigSourceMode.valueOf(profile.sourceMode) }.getOrDefault(ConfigSourceMode.EMBED_NODES),
@@ -297,7 +305,9 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     }
 
     fun requestExport(action: ExportAction) {
-        if (profile.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name && state.sources.any { it.id in profile.selectedSourceIds && it.providerCompatible == true }) pendingSensitiveAction = action
+        if (generated.unresolvedTemplateProviders.isNotEmpty()) {
+            viewModel.run { throw IllegalStateException("请先为模板订阅绑定机场：${generated.unresolvedTemplateProviders.joinToString("、")}") }
+        } else if (generated.referencedSubscriptions > 0) pendingSensitiveAction = action
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
     }
 
@@ -389,8 +399,8 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         ) { insets ->
             Column(Modifier.fillMaxSize().padding(insets)) {
                 viewModel.message?.let { message ->
-                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                        Text(message, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
+                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                        Text(message, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall, color = if (viewModel.messageIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
                     }
                 }
                 AnimatedContent(
@@ -454,6 +464,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
                                 configText = configText, shareUrl = shareUrl, shareError = shareError, filename = filename,
+                                transferStats = shareStats,
+                                unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
+                                templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
+                                templateBindings = profile.templateProviderBindings,
+                                hasRegionalProxyGroups = parsedTemplate?.hasRegionalProxyGroups == true,
+                                onTemplateBinding = viewModel::bindTemplateProvider,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
                                 onOpenFilters = { showExportSetup = true }, onDownload = { requestExport(ExportAction.Download) },
                                 onShare = { requestExport(ExportAction.Share) }, onStopShare = { shareController.stop() },
@@ -672,7 +688,7 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
         }
         if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "添加机场订阅，或到“节点”页直接导入节点链接。", onAdd) }
         items(state.sources, key = { it.id }) { source ->
-            Card(Modifier.fillMaxWidth()) {
+            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -923,7 +939,7 @@ private fun RulesPage(
                 if (state.ruleProfile.groups.isEmpty()) EmptyCard("还没有策略组", "创建策略组后，规则就可以选择对应的出口。", onAddGroup)
                 else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(state.ruleProfile.groups, key = { it.name }) { group ->
-                        Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Outlined.Hub, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) { Text(group.name, style = MaterialTheme.typography.titleSmall); Text("${group.type} · ${group.members.size} 个成员", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                             TextButton(onClick = { onEditGroup(group) }) { Text("编辑") }
@@ -934,14 +950,14 @@ private fun RulesPage(
             }
             else -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 HeaderCard("规则集与子规则", "规则集可以远程下载、读取本地文件或内嵌；子规则保存在当前配置中。")
-                Card(onClick = onProviders, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                Card(onClick = onProviders, modifier = Modifier.fillMaxWidth().padding(top = 10.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                     Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) { Text("规则集提供者", style = MaterialTheme.typography.titleMedium); Text("${state.ruleProfile.providers.size} 个 · 远程 / 文件 / 内嵌", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         Icon(Icons.Outlined.Edit, "管理规则集")
                     }
                 }
-                state.ruleProfile.subRules.forEach { sub -> Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(sub.name, fontWeight = FontWeight.Medium); Text("${sub.rules.size} 条子规则", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; TextButton(onClick = onProviders) { Text("管理") } } } }
+                state.ruleProfile.subRules.forEach { sub -> Card(Modifier.fillMaxWidth().padding(top = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(sub.name, fontWeight = FontWeight.Medium); Text("${sub.rules.size} 条子规则", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; TextButton(onClick = onProviders) { Text("管理") } } } }
             }
         }
     }
@@ -950,7 +966,7 @@ private fun RulesPage(
 @Composable
 private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean) {
     var expanded by remember { mutableStateOf(false) }
-    Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
+    Card(onClick = onEdit, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(if (rule.type == "MATCH") "最终兜底 · MATCH" else rule.type, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
@@ -989,6 +1005,12 @@ private fun ExportPage(
     filename: String,
     shareUrl: String?,
     shareError: String?,
+    transferStats: com.jzb.jichang.android.share.ShareTransferStats?,
+    unresolvedTemplateProviders: List<String>,
+    templateParameters: List<TemplateSubscriptionParameter>,
+    templateBindings: Map<String, String>,
+    hasRegionalProxyGroups: Boolean,
+    onTemplateBinding: (String, String?) -> Unit,
     onModeChange: (ConfigSourceMode) -> Unit,
     onOpenFilters: () -> Unit,
     onDownload: () -> Unit,
@@ -999,11 +1021,11 @@ private fun ExportPage(
 ) {
     val profile = state.activeProfile
     Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
-        Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(profile.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text("${generatedNodes} 个内嵌节点${if (referencedSubscriptions > 0) " · $referencedSubscriptions 个订阅引用" else ""}${if (skippedNodes > 0) " · 跳过 $skippedNodes 个不支持节点" else ""}", style = MaterialTheme.typography.bodySmall)
-                Text("文件名：$filename", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text("文件名：$filename", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -1018,12 +1040,32 @@ private fun ExportPage(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
+        if (templateParameters.isNotEmpty()) {
+            Text("模板机场绑定", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("绑定到资源中的 Mihomo 订阅。链接保存在订阅资源中，模板不会保存或改写机场凭据。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            templateParameters.forEach { parameter ->
+                TemplateProviderBindingRow(
+                    parameter = parameter,
+                    selectedSourceId = templateBindings[parameter.providerName],
+                    sources = state.sources.filter { it.id in profile.selectedSourceIds && it.providerCompatible == true },
+                    onSelect = { onTemplateBinding(parameter.providerName, it) },
+                )
+            }
         }
+        if (!hasRegionalProxyGroups) OutlinedButton(onClick = onOpenFilters, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
+        } else Text("模板已包含地区筛选策略组，直接沿用模板分组。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (unresolvedTemplateProviders.isNotEmpty()) Text(
+            "尚未绑定：${unresolvedTemplateProviders.joinToString("、")}。请启用兼容订阅并完成绑定后再导出。",
+            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.CloudDownload, null); Spacer(Modifier.width(6.dp)); Text("下载配置") }
-            OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Link, null); Spacer(Modifier.width(6.dp)); Text(if (shareUrl == null) "开启局域网分享" else "重新生成链接") }
+            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text("下载配置", maxLines = 1, softWrap = false)
+            }
+            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty(), modifier = Modifier.weight(1f).height(52.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false)
+            }
         }
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -1034,6 +1076,9 @@ private fun ExportPage(
                 LanShareQrCodeCard(url)
                 SelectionContainer { Text(url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
                 Text("接收设备需连接同一局域网。二维码和随机链接都可访问配置，请只展示给信任的人。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                transferStats?.let { stats ->
+                    Text("最近传输：${formatBytes(stats.bytes)} · ${if (stats.compressed) "gzip" else "未压缩"} · 服务端 ${stats.serverMillis} ms", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onShareLink, modifier = Modifier.weight(1f)) { Icon(Icons.Outlined.Share, null); Spacer(Modifier.width(5.dp)); Text("分享链接") }
                     TextButton(onClick = onStopShare) { Text("停止") }
@@ -1050,6 +1095,33 @@ private fun ExportPage(
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun TemplateProviderBindingRow(
+    parameter: TemplateSubscriptionParameter,
+    selectedSourceId: String?,
+    sources: List<com.jzb.jichang.android.model.SubscriptionSource>,
+    onSelect: (String?) -> Unit,
+) {
+    val selected = sources.firstOrNull { it.id == selectedSourceId }
+    var expanded by remember(parameter.providerName) { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(parameter.providerName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Box {
+                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(selected?.name ?: "选择订阅资源", modifier = Modifier.weight(1f), textAlign = TextAlign.Start, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.Outlined.KeyboardArrowDown, null)
+                }
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    sources.forEach { source -> DropdownMenuItem(text = { Text(source.name) }, onClick = { onSelect(source.id); expanded = false }) }
+                    if (selectedSourceId != null) DropdownMenuItem(text = { Text("解除绑定") }, onClick = { onSelect(null); expanded = false })
+                }
+            }
+            if (selected == null) Text("未绑定或原订阅已删除。请先在资源页启用一个兼容的 Mihomo 订阅。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 
@@ -1079,6 +1151,12 @@ private fun LanShareQrCodeCard(url: String) {
         }
         Text("用同一局域网内的设备扫描下载配置", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+private fun formatBytes(bytes: Int): String = when {
+    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024f * 1024f))
+    bytes >= 1024 -> "%.1f KB".format(bytes / 1024f)
+    else -> "$bytes B"
 }
 
 @Composable
@@ -1120,7 +1198,7 @@ private fun TemplatesPage(
         }
         items(templates, key = { it.id }) { template ->
             val users = profiles.count { it.templateId == template.id }
-            Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth()) {
+            Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
@@ -1254,7 +1332,7 @@ private fun RemoteConfigDialog(
 
 @Composable
 private fun SourceModeCard(title: String, detail: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface)) {
+    Card(onClick = onClick, modifier = modifier, colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             RadioButton(selected = selected, onClick = onClick)
             Column(Modifier.padding(start = 4.dp)) {
@@ -1267,7 +1345,7 @@ private fun SourceModeCard(title: String, detail: String, selected: Boolean, mod
 
 @Composable
 private fun HeaderCard(title: String, detail: String) {
-    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(detail, style = MaterialTheme.typography.bodySmall)
@@ -1277,7 +1355,7 @@ private fun HeaderCard(title: String, detail: String) {
 
 @Composable
 private fun EmptyCard(title: String, detail: String, onAction: () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(vertical = 16.dp)) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1494,7 +1572,7 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
                 }
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(entries) { type ->
-                        Card(onClick = { onSelect(type) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (type == selected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.76f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.66f))) {
+                        Card(onClick = { onSelect(type) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (type == selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
                             Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) { Text(type, fontWeight = FontWeight.Medium); Text(ruleTypeDescription(type), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 if (type == selected) Text("已选", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
@@ -1547,7 +1625,7 @@ private fun ConditionEditor(condition: RuleCondition, providerNames: List<String
     var typeMenu by remember { mutableStateOf(false) }
     var opMenu by remember { mutableStateOf(false) }
     val isLogic = condition.operator != null
-    Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {
                 TextButton(onClick = { if (isLogic) opMenu = true else typeMenu = true }) { Text(condition.operator ?: condition.type ?: "类型") }
@@ -1597,11 +1675,11 @@ private fun RuleProvidersDialog(initial: RuleProfile, onDismiss: () -> Unit, onS
     } else AlertDialog(onDismissRequest = onDismiss, title = { Text("规则集与子规则") },
         text = { Column(Modifier.height(440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("规则集提供者", style = MaterialTheme.typography.titleSmall)
-            providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { profile = profile.copy(providers = providers - provider) }) { Icon(Icons.Outlined.Delete, null) } } } }
+            providers.forEach { provider -> Card(onClick = { editing = provider }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(provider.name); Text("${provider.type} · ${provider.behavior}", style = MaterialTheme.typography.labelSmall) }; IconButton(onClick = { profile = profile.copy(providers = providers - provider) }) { Icon(Icons.Outlined.Delete, null) } } } }
             OutlinedButton(onClick = { editing = RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集") }, modifier = Modifier.fillMaxWidth()) { Text("添加规则集提供者") }
             Text("本地子规则", style = MaterialTheme.typography.titleSmall)
             profile.subRules.forEach { rule ->
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) { Text(rule.name); Text("${rule.rules.size} 条规则", style = MaterialTheme.typography.labelSmall) }
                         TextButton(onClick = { editingSubRule = rule.name to null }) { Text("添加规则") }

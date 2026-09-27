@@ -28,6 +28,7 @@ data class GeneratedConfig(
     val exportedNodes: Int,
     val skippedNodes: Int,
     val referencedSubscriptions: Int = 0,
+    val unresolvedTemplateProviders: List<String> = emptyList(),
 )
 
 /** Builds one Mihomo profile; it intentionally has no per-client dialect matrix. */
@@ -41,6 +42,11 @@ class MihomoConfigGenerator {
         generate(state, state.activeProfile, exportOptions)
 
     fun generate(state: AppState, profile: ConfigProfile, exportOptions: ConfigExportOptions = optionsFor(profile)): GeneratedConfig {
+        val parsedTemplate = profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id } }
+            ?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() }
+        val templateRoot = parsedTemplate?.rawRoot.orEmpty()
+        val placeholderNames = parsedTemplate?.subscriptionParameters?.map { it.providerName }.orEmpty()
+        val templateHasRegionalGroups = parsedTemplate?.hasRegionalProxyGroups == true
         val enabledSources = state.sources.filter { it.id in (exportOptions.selectedSourceIds ?: state.sources.filter { source -> source.enabled }.map { it.id }.toSet()) }
         val enabledSourceIds = enabledSources.map { it.id }.toSet()
         val selectedNodes = state.nodes.filter { node ->
@@ -49,10 +55,21 @@ class MihomoConfigGenerator {
         }
         val supportedSelected = selectedNodes.filter { it.type.lowercase() in supportedTypes }
         val skipped = selectedNodes.size - supportedSelected.size
+        val boundTemplateSources = placeholderNames.mapNotNull { name ->
+            profile.templateProviderBindings[name]?.let { id -> enabledSources.firstOrNull { it.id == id && it.providerCompatible == true }?.let { name to it } }
+        }
+        val unresolvedTemplateProviders = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
+            placeholderNames.filter { name -> boundTemplateSources.none { it.first == name } }
+        } else emptyList()
         val providerSources = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
             enabledSources.filter { it.providerCompatible == true }
         } else emptyList()
-        val providerNames = providerSources.mapIndexed { index, source -> source.id to "订阅-${index + 1}" }.toMap()
+        val templateProviderNames = boundTemplateSources.associate { (name, source) -> source.id to name }
+        val genericProviderSources = providerSources.filterNot { it.id in templateProviderNames.keys }
+        val providerNames = LinkedHashMap<String, String>().apply {
+            putAll(templateProviderNames)
+            genericProviderSources.forEachIndexed { index, source -> put(source.id, "订阅-${index + 1}") }
+        }
         val embeddedNodes = if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
             supportedSelected.filter { it.sourceId == null || it.sourceId !in providerNames.keys }
         } else supportedSelected
@@ -64,7 +81,7 @@ class MihomoConfigGenerator {
         val includedRemoteNodes = providerSnapshotNodes.filter { it.id in selectedNodeIds && it.id !in exportOptions.excludedNodeIds }
         val regions = includedRemoteNodes.associate { node -> node.id to regionFor(node, exportOptions) }
         val generated = generateRegionGroups(
-            options = exportOptions,
+            options = if (templateHasRegionalGroups) exportOptions.copy(enabledRegions = emptySet()) else exportOptions,
             embeddedNodes = embeddedNodes,
             embeddedNames = names,
             providerNames = providerNames.values.toList(),
@@ -74,7 +91,27 @@ class MihomoConfigGenerator {
         )
 
         val ruleProfile = profile.ruleProfile
-        val configuredGroups = ruleProfile.groups.filter { it.name.isNotBlank() }.ifEmpty { listOf(PolicyGroup("PROXY")) }
+        val configuredGroups = ruleProfile.groups.filter { it.name.isNotBlank() }.ifEmpty { listOf(PolicyGroup("PROXY")) }.map { group ->
+            if (placeholderNames.isEmpty()) group else {
+                val use = (group.extra["use"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+                if (use.none { it in placeholderNames }) group else {
+                    val shouldInline = exportOptions.sourceMode == ConfigSourceMode.EMBED_NODES
+                    val unresolvedForGroup = if (shouldInline) placeholderNames.toSet() else unresolvedTemplateProviders.toSet()
+                    val remainingUse = use.filterNot { it in unresolvedForGroup }
+                    val hasFilter = group.extra.containsKey("filter") || group.extra.containsKey("exclude-filter")
+                    val localSourceIds = if (shouldInline) boundTemplateSources.filter { it.first in use }.map { it.second.id }.toSet() else emptySet()
+                    val localNames = embeddedNodes.filter { it.sourceId in localSourceIds }.mapNotNull { node ->
+                        proxyNamesById[node.id]
+                    }
+                    val extra = LinkedHashMap(group.extra).apply {
+                        if (remainingUse.isEmpty()) remove("use") else put("use", remainingUse)
+                        if (shouldInline && hasFilter) put("include-all", true)
+                    }
+                    val members = if (shouldInline && !hasFilter) (group.members + localNames).distinct() else group.members
+                    group.copy(members = members, extra = extra)
+                }
+            }
+        }
         val groups = (configuredGroups + generated.groups).distinctBy { it.name }
         val groupNames = groups.map { it.name }.toSet()
         val allNodeNames = state.nodes.associate { it.id to it.name.safeName() }
@@ -110,7 +147,7 @@ class MihomoConfigGenerator {
                             filters.first?.let { put("filter", it) }
                             filters.second?.let { put("exclude-filter", it) }
                         }
-                    } else if (!isDefaultMaster) {
+                    } else if (!isDefaultMaster && group.extra["use"] == null) {
                         val remoteMembers = if (group.members.isEmpty()) includedRemoteNodes else group.members.mapNotNull { member ->
                             if (member.startsWith("node:")) includedRemoteNodes.firstOrNull { it.id == member.removePrefix("node:") } else null
                         }
@@ -135,9 +172,21 @@ class MihomoConfigGenerator {
         val fallbackTarget = explicitFallback?.group?.takeIf { it in groupNames || it == "DIRECT" || it == "REJECT" } ?: fallbackDefault
         regularRules += "MATCH,$fallbackTarget"
 
-        val templateRoot = profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id } }
-            ?.let { template -> MihomoTemplateParser().parse(template.rawYaml).rawRoot }
-            .orEmpty()
+        val placeholderProviderNames = placeholderNames.toSet()
+        val rawProviders = templateRoot["proxy-providers"].asStringMap().orEmpty()
+        val outputTemplateProviders = LinkedHashMap<String, Any?>().apply {
+            rawProviders.forEach { (name, value) -> if (name !in placeholderProviderNames) put(name, value) }
+            if (exportOptions.sourceMode == ConfigSourceMode.REFERENCE_SUBSCRIPTIONS) {
+                boundTemplateSources.forEach { (name, source) ->
+                    val original = rawProviders[name].asStringMap().orEmpty()
+                    put(name, LinkedHashMap<String, Any?>().apply {
+                        putAll(original)
+                        put("url", source.url)
+                    })
+                }
+                genericProviderSources.forEachIndexed { index, source -> put("订阅-${index + 1}", subscriptionProvider(source, index + 1)) }
+            }
+        }
         val root = LinkedHashMap<String, Any?>().apply {
             putAll(templateRoot)
             putIfAbsent("mixed-port", 7890)
@@ -147,15 +196,7 @@ class MihomoConfigGenerator {
             putIfAbsent("ipv6", true)
         }
         root["proxies"] = proxies
-        if (providerNames.isNotEmpty()) root["proxy-providers"] = providerSources.mapIndexed { index, source ->
-            "订阅-${index + 1}" to linkedMapOf<String, Any?>(
-                "type" to "http",
-                "url" to source.url,
-                "path" to "./providers/jichang-${index + 1}.yaml",
-                "interval" to 3600,
-                "health-check" to linkedMapOf("enable" to true, "url" to "https://www.gstatic.com/generate_204", "interval" to 600),
-            )
-        }.toMap(LinkedHashMap())
+        if (outputTemplateProviders.isNotEmpty()) root["proxy-providers"] = outputTemplateProviders else root.remove("proxy-providers")
         if (ruleProfile.providers.isNotEmpty()) root["rule-providers"] = ruleProfile.providers
             .filter { it.name.isNotBlank() }
             .associateTo(LinkedHashMap()) { provider -> provider.name.safeKey() to ruleProviderMap(provider) }
@@ -173,7 +214,7 @@ class MihomoConfigGenerator {
             defaultScalarStyle = DumperOptions.ScalarStyle.PLAIN
             width = 120
         }
-        return GeneratedConfig(Yaml(dumpOptions).dump(root), embeddedNodes.size, skipped, providerNames.size)
+        return GeneratedConfig(Yaml(dumpOptions).dump(root), embeddedNodes.size, skipped, outputTemplateProviders.size, unresolvedTemplateProviders)
     }
 
     private fun serializeRule(rule: com.jzb.jichang.android.model.RoutingRule, target: String, subRuleNames: Set<String> = emptySet(), ruleProviderNames: Set<String> = emptySet()): String? {
@@ -250,6 +291,16 @@ class MihomoConfigGenerator {
 
     private fun String.safeField(): String = if (contains(',') || contains('\n') || contains('\r')) "" else this
     private fun String.safeKey(): String = replace("[\\r\\n]+".toRegex(), "_").trim().ifBlank { "rules" }
+
+    private fun Any?.asStringMap(): Map<String, Any?>? {
+        val raw = this as? Map<*, *> ?: return null
+        return raw.entries.associate { (key, value) -> key.toString() to value }
+    }
+
+    private fun subscriptionProvider(source: com.jzb.jichang.android.model.SubscriptionSource, index: Int) = linkedMapOf<String, Any?>(
+        "type" to "http", "url" to source.url, "path" to "./providers/jichang-$index.yaml", "interval" to 3600,
+        "health-check" to linkedMapOf("enable" to true, "url" to "https://www.gstatic.com/generate_204", "interval" to 600),
+    )
 
     private data class GeneratedGroups(val groups: List<PolicyGroup>, val filters: Map<String, Pair<String?, String?>>)
 

@@ -9,9 +9,11 @@ import com.jzb.jichang.android.model.RuleCondition
 import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubscriptionSource
+import com.jzb.jichang.android.model.ConfigTemplate
 import com.jzb.jichang.android.service.ConfigExportOptions
 import com.jzb.jichang.android.service.ConfigSourceMode
 import com.jzb.jichang.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.service.MihomoTemplateParser
 import com.jzb.jichang.android.service.NodeAutoGroups
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,6 +24,69 @@ import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
 
 class MihomoConfigGeneratorTest {
+    @Test fun bindsTemplateProviderAndSuppressesDuplicateRegionalGroups() {
+        val source = SubscriptionSource("source", "机场订阅", "https://sub.example/user/token", providerCompatible = true)
+        val node = ProxyNode("hk-node", source.id, "香港 IEPL", "ss", "hk.example", 443)
+        val template = ConfigTemplate("template", "模板", regionalTemplate, "template.yaml")
+        val profile = ConfigProfile(
+            id = "profile", name = "分享配置", templateId = template.id,
+            selectedSourceIds = setOf(source.id), enabledNodeIds = setOf(node.id),
+            sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name,
+            templateProviderBindings = mapOf("我的节点" to source.id),
+            ruleProfile = MihomoTemplateParser().parse(regionalTemplate).ruleProfile,
+        )
+        val state = AppState(sources = listOf(source), nodes = listOf(node), profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
+
+        val output = MihomoConfigGenerator().generate(state)
+        @Suppress("UNCHECKED_CAST")
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
+        @Suppress("UNCHECKED_CAST")
+        val providers = root["proxy-providers"] as Map<String, Map<String, Any?>>
+        @Suppress("UNCHECKED_CAST")
+        val groups = root["proxy-groups"] as List<Map<String, Any?>>
+
+        assertEquals("https://sub.example/user/token", providers.getValue("我的节点")["url"])
+        assertEquals(listOf("我的节点"), groups.single { it["name"] == "香港自动选择" }["use"])
+        assertEquals(0, groups.count { it["name"].toString().startsWith("🌏") })
+        assertTrue(output.unresolvedTemplateProviders.isEmpty())
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+    }
+
+    @Test fun embeddedTemplateRemovesPlaceholderAndKeepsRegionalFilterOnLocalNodes() {
+        val source = SubscriptionSource("source", "机场订阅", "https://sub.example/user/token", providerCompatible = true)
+        val node = ProxyNode("hk-node", source.id, "香港 IEPL", "ss", "hk.example", 443)
+        val template = ConfigTemplate("template", "模板", regionalTemplate, "template.yaml")
+        val profile = ConfigProfile(
+            id = "profile", name = "分享配置", templateId = template.id,
+            selectedSourceIds = setOf(source.id), enabledNodeIds = setOf(node.id),
+            sourceMode = ConfigSourceMode.EMBED_NODES.name,
+            templateProviderBindings = mapOf("我的节点" to source.id),
+            ruleProfile = MihomoTemplateParser().parse(regionalTemplate).ruleProfile,
+        )
+        val state = AppState(sources = listOf(source), nodes = listOf(node), profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
+        val output = MihomoConfigGenerator().generate(state)
+        @Suppress("UNCHECKED_CAST")
+        val root = Yaml(SafeConstructor(LoaderOptions())).load<Map<String, Any?>>(output.yaml)
+        @Suppress("UNCHECKED_CAST")
+        val groups = root["proxy-groups"] as List<Map<String, Any?>>
+        val hk = groups.single { it["name"] == "香港自动选择" }
+
+        assertTrue(root["proxy-providers"] == null)
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+        assertEquals(true, hk["include-all"])
+        assertEquals("香港", hk["filter"])
+        assertEquals(0, groups.count { it["name"].toString().startsWith("🌏") })
+    }
+
+    @Test fun unboundTemplatePlaceholderBlocksReferenceExportAndNeverLeaks() {
+        val template = ConfigTemplate("template", "模板", regionalTemplate, "template.yaml")
+        val profile = ConfigProfile(id = "profile", name = "配置", templateId = template.id, sourceMode = ConfigSourceMode.REFERENCE_SUBSCRIPTIONS.name)
+        val state = AppState(profiles = listOf(profile), activeProfileId = profile.id, templates = listOf(template))
+        val output = MihomoConfigGenerator().generate(state)
+        assertEquals(listOf("我的节点"), output.unresolvedTemplateProviders)
+        assertFalse(output.yaml.contains("机场的订阅地址"))
+    }
+
     @Test fun emitsParsableMihomoYamlWithGroupsRulesAndOnlyEnabledNodes() {
         val node = ProxyNode(
             id = "1", sourceId = null, name = "Node: one", type = "trojan", server = "node.example", port = 443,
@@ -191,4 +256,23 @@ class MihomoConfigGeneratorTest {
         )
         return AppState(sources, nodes, listOf(profile), profile.id)
     }
+
+    private val regionalTemplate = """
+        mixed-port: 7890
+        proxy-providers:
+          我的节点:
+            type: http
+            url: 机场的订阅地址
+            path: ./providers/example.yaml
+            interval: 3600
+        proxy-groups:
+          - name: 香港自动选择
+            type: url-test
+            use: [我的节点]
+            filter: 香港
+            url: https://www.gstatic.com/generate_204
+            interval: 300
+        rules:
+          - MATCH,香港自动选择
+    """.trimIndent()
 }

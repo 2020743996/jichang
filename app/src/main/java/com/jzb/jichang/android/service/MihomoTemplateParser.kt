@@ -10,12 +10,17 @@ import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
 import java.util.UUID
+import java.net.URI
 
 data class ParsedMihomoTemplate(
     val rawRoot: Map<String, Any?>,
     val nodes: List<ProxyNode>,
     val ruleProfile: RuleProfile,
+    val subscriptionParameters: List<TemplateSubscriptionParameter>,
+    val hasRegionalProxyGroups: Boolean,
 )
+
+data class TemplateSubscriptionParameter(val providerName: String)
 
 /** Reads templates with SnakeYAML's safe constructor and keeps the original document for export. */
 class MihomoTemplateParser {
@@ -74,7 +79,26 @@ class MihomoTemplateParser {
             providers = ruleProviders,
             subRules = subRules,
         )
-        return ParsedMihomoTemplate(root, nodes, ruleProfile)
+        val providers = root["proxy-providers"].asStringMap().orEmpty()
+        val subscriptionParameters = providers.mapNotNull { (name, raw) ->
+            val provider = raw.asStringMap() ?: return@mapNotNull null
+            if (!provider["type"].toString().equals("http", ignoreCase = true)) return@mapNotNull null
+            val url = provider["url"]?.toString().orEmpty().trim()
+            if (isSubscriptionPlaceholder(url)) TemplateSubscriptionParameter(name) else null
+        }
+        val hasRegionalProxyGroups = groups.any { group ->
+            val hasProviderFilter = group.extra.keys.any { it == "filter" || it == "exclude-filter" }
+            hasProviderFilter && NodeAutoGroups.isRegionalGroup(group.name)
+        }
+        return ParsedMihomoTemplate(root, nodes, ruleProfile, subscriptionParameters, hasRegionalProxyGroups)
+    }
+
+    private fun isSubscriptionPlaceholder(value: String): Boolean {
+        if (value.isBlank()) return true
+        val marker = Regex("(?i)(\\{\\{|\\$\\{?|订阅.{0,6}(地址|链接|url)|机场.{0,6}(地址|链接|url)|your[_ -]?(subscription|url)|placeholder|replace[_ -]?me|example\\.(com|org|net))")
+        if (marker.containsMatchIn(value)) return true
+        val uri = runCatching { URI(value) }.getOrNull() ?: return true
+        return uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()
     }
 
     private fun parseRule(line: String): RoutingRule? {

@@ -8,13 +8,16 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class LocalShareController(context: Context) {
     private val appContext = context.applicationContext
     private val mutableUrl = MutableStateFlow<String?>(null)
     private val mutableError = MutableStateFlow<String?>(null)
+    private val mutableStats = MutableStateFlow<ShareTransferStats?>(null)
     val url: StateFlow<String?> = mutableUrl
     val error: StateFlow<String?> = mutableError
+    val transferStats: StateFlow<ShareTransferStats?> = mutableStats.asStateFlow()
     private var pendingConfig: Pair<String, String>? = null
     private var bound = false
     private var service: LocalShareService? = null
@@ -22,6 +25,8 @@ class LocalShareController(context: Context) {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as? LocalShareService.LocalBinder)?.service()
             val activeService = service ?: return
+            activeService.onTransferStats = { mutableStats.value = it }
+            mutableStats.value = activeService.transferStats.value
             runCatching { pendingConfig?.let { activeService.startSharing(it.first, it.second) } ?: activeService.currentUrl }
                 .onSuccess { mutableUrl.value = it; mutableError.value = null }
                 .onFailure { error ->
@@ -50,6 +55,7 @@ class LocalShareController(context: Context) {
 
     fun stop() {
         service?.stopSharing()
+        service?.onTransferStats = null
         appContext.stopService(Intent(appContext, LocalShareService::class.java))
         if (bound) appContext.unbindService(connection)
         bound = false
@@ -57,6 +63,7 @@ class LocalShareController(context: Context) {
         pendingConfig = null
         mutableUrl.value = null
         mutableError.value = null
+        mutableStats.value = null
     }
 
     fun updateConfig(config: String, filename: String) { service?.updateConfig(config, filename) }
@@ -66,6 +73,7 @@ class LocalShareController(context: Context) {
     }
 
     fun unbind() {
+        service?.onTransferStats = null
         if (bound) appContext.unbindService(connection)
         bound = false
         service = null

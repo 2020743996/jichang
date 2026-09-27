@@ -25,6 +25,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     var message: String? by mutableStateOf(null)
         private set
+    var messageIsError: Boolean by mutableStateOf(false)
+        private set
     var generated: GeneratedConfig = generator.generate(AppState())
         private set
     var refreshingSourceIds: Set<String> by mutableStateOf(emptySet())
@@ -54,7 +56,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun run(action: suspend () -> String?) {
         viewModelScope.launch {
             message = null
-            try { message = action() } catch (error: Throwable) { message = error.message ?: "操作失败" }
+            messageIsError = false
+            try {
+                message = action()
+                messageIsError = message?.let { it.contains("失败") || it.contains("错误") } == true
+            } catch (error: Throwable) { message = error.message ?: "操作失败"; messageIsError = true }
         }
     }
 
@@ -99,6 +105,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun removeRule(index: Int) = run { repository.removeRule(index); "规则已删除" }
     fun saveRuleProfile(profile: RuleProfile) = run { repository.saveRuleProfile(profile); "规则集配置已保存" }
     fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = run { repository.updateExportSettings(sourceMode, enabledRegions, regionOverrides); null }
+    fun bindTemplateProvider(name: String, sourceId: String?) = run { repository.setTemplateProviderBinding(name, sourceId); "模板订阅绑定已更新" }
 
     override fun onCleared() {
         repository.close()

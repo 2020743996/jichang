@@ -18,6 +18,8 @@ private val LightColors = lightColorScheme(
     onSecondaryContainer = Color(0xFF1C2A40),
     tertiary = Color(0xFF6B829E),
     onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFEAF0F7),
+    onTertiaryContainer = Color(0xFF24364A),
     background = Color(0xFFF5F6F8),
     onBackground = Color(0xFF17191D),
     surface = Color(0xFFFFFFFF),
@@ -27,6 +29,12 @@ private val LightColors = lightColorScheme(
     outline = Color(0xFFBBC0C8),
     outlineVariant = Color(0xFFE1E3E7),
     error = Color(0xFFBA1A1A),
+    errorContainer = Color(0xFFFFEDEA),
+    onErrorContainer = Color(0xFF410E0B),
+    inverseSurface = Color(0xFF2B3038),
+    inverseOnSurface = Color(0xFFF1F3F6),
+    inversePrimary = Color(0xFFAFC8FF),
+    surfaceTint = Color(0xFF3478F6),
 )
 
 internal object JichangSpacing {

@@ -17,11 +17,19 @@ import java.net.NetworkInterface
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.io.ByteArrayInputStream
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+
+data class ShareTransferStats(val bytes: Int, val serverMillis: Long, val compressed: Boolean)
 
 class LocalShareService : Service() {
     private val binder = LocalBinder()
     private var server: ConfigServer? = null
-    @Volatile private var sharedConfig: Pair<String, String>? = null
+    @Volatile private var sharedConfig: SharePayload? = null
+    private val mutableTransferStats = MutableStateFlow<ShareTransferStats?>(null)
+    val transferStats: StateFlow<ShareTransferStats?> = mutableTransferStats
+    var onTransferStats: ((ShareTransferStats?) -> Unit)? = null
     var currentUrl: String? = null
         private set
 
@@ -50,8 +58,8 @@ class LocalShareService : Service() {
         val address = findLanAddress() ?: error("没有找到局域网地址，请连接 Wi-Fi 或有线网络")
         val tokenBytes = ByteArray(18).also(SecureRandom()::nextBytes)
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes)
-        sharedConfig = config to filename
-        val active = ConfigServer(address, token) { sharedConfig ?: ("" to "鸡场.yaml") }
+        sharedConfig = SharePayload(config, filename)
+        val active = ConfigServer(address, token, { sharedConfig ?: SharePayload("", "鸡场.yaml") }, mutableTransferStats) { onTransferStats?.invoke(it) }
         active.start(5_000, false)
         server = active
         currentUrl = "http://$address:${active.listeningPort}/$token/config.yaml"
@@ -65,7 +73,7 @@ class LocalShareService : Service() {
         currentUrl = null
     }
 
-    fun updateConfig(config: String, filename: String) { if (currentUrl != null) sharedConfig = config to filename }
+    fun updateConfig(config: String, filename: String) { if (currentUrl != null) sharedConfig = SharePayload(config, filename) }
 
     override fun onDestroy() {
         stopSharing()
@@ -126,20 +134,46 @@ class LocalShareService : Service() {
         }
     }
 
-    private class ConfigServer(host: String, private val token: String, private val config: () -> Pair<String, String>) : NanoHTTPD(host, 0) {
+    private class ConfigServer(
+        host: String,
+        private val token: String,
+        private val config: () -> SharePayload,
+        private val stats: MutableStateFlow<ShareTransferStats?>,
+        private val onStats: (ShareTransferStats) -> Unit,
+    ) : NanoHTTPD(host, 0) {
         override fun serve(session: IHTTPSession): Response {
-            if (session.method != Method.GET) return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed")
+            if (session.method !in setOf(Method.GET, Method.HEAD)) return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed").apply {
+                addHeader("Allow", "GET, HEAD")
+            }
             val expected = "/$token/config.yaml"
             val actual = session.uri
             if (!MessageDigest.isEqual(expected.toByteArray(), actual.toByteArray())) {
                 return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
             }
-            val (yaml, filename) = config()
-            return newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", yaml).apply {
+            val started = System.nanoTime()
+            val payload = config()
+            val acceptsGzip = session.headers["accept-encoding"]?.split(',')?.any { token ->
+                val parts = token.trim().split(';')
+                val coding = parts.firstOrNull()?.trim()
+                val quality = parts.drop(1).firstOrNull { it.trim().startsWith("q=", ignoreCase = true) }
+                    ?.substringAfter('=')?.toDoubleOrNull() ?: 1.0
+                coding.equals("gzip", ignoreCase = true) && quality > 0.0
+            } == true
+            val encoded = payload.encode(acceptsGzip)
+            val bytes = encoded.bytes
+            val response = newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", ByteArrayInputStream(bytes), bytes.size.toLong()).apply {
                 addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
                 addHeader("X-Content-Type-Options", "nosniff")
-                addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")
+                addHeader("Vary", "Accept-Encoding")
+                addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(payload.filename, "UTF-8").replace("+", "%20")}")
+                if (encoded.compressed) addHeader("Content-Encoding", "gzip")
             }
+            if (session.method == Method.GET) {
+                val latest = ShareTransferStats(bytes.size, (System.nanoTime() - started) / 1_000_000, encoded.compressed)
+                stats.value = latest
+                onStats(latest)
+            }
+            return response
         }
     }
 

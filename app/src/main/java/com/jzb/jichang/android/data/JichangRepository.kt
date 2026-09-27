@@ -79,6 +79,7 @@ class JichangRepository(private val dao: SnapshotDao) {
         }.orEmpty()
         if (profilesJson != null && profilesJson.size() > 0) {
             val profiles = gson.fromJson<List<ConfigProfile>>(profilesJson, object : TypeToken<List<ConfigProfile>>() {}.type)
+                .map { it.copy(templateProviderBindings = it.templateProviderBindings.orEmpty()) }
             val activeId = json.get("activeProfileId")?.asString?.takeIf { id -> profiles.any { it.id == id } } ?: profiles.first().id
             return AppState(sources, nodes, profiles, activeId, templates)
         }
@@ -106,7 +107,7 @@ class JichangRepository(private val dao: SnapshotDao) {
             regionOverrides = active.regionOverrides.toMap(), ruleProfile = active.ruleProfile.copy(
                 groups = active.ruleProfile.groups.toList(), rules = active.ruleProfile.rules.toList(),
                 providers = active.ruleProfile.providers.toList(), subRules = active.ruleProfile.subRules.toList(),
-            ),
+            ), templateProviderBindings = active.templateProviderBindings.toMap(),
         ) else ConfigProfile(
             id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
         )
@@ -383,6 +384,10 @@ class JichangRepository(private val dao: SnapshotDao) {
 
     suspend fun updateExportSettings(sourceMode: String, enabledRegions: Set<String>, regionOverrides: Map<String, String>) = updateProfile { profile ->
         profile.copy(sourceMode = sourceMode, enabledRegions = enabledRegions, regionOverrides = regionOverrides)
+    }
+
+    suspend fun setTemplateProviderBinding(providerName: String, sourceId: String?) = updateProfile { profile ->
+        profile.copy(templateProviderBindings = if (sourceId.isNullOrBlank()) profile.templateProviderBindings - providerName else profile.templateProviderBindings + (providerName to sourceId))
     }
 
     private fun ruleProfile(profile: ConfigProfile) = profile.ruleProfile

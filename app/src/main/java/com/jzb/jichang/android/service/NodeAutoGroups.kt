@@ -20,5 +20,17 @@ object NodeAutoGroups {
 
     fun classify(name: String): String = regions.firstOrNull { it.matcher.containsMatchIn(name) }?.key ?: OTHER
 
+    fun isRegionalGroup(name: String): Boolean = regions.any { region ->
+        name.contains(region.title, ignoreCase = true) || when (region.key) {
+            "hk" -> Regex("\\bHK\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            "tw" -> Regex("\\bTW\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            "jp" -> Regex("\\bJP\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            "sg" -> Regex("\\bSG\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            "us" -> Regex("\\bUS\\b|\\bUSA\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            "kr" -> Regex("\\bKR\\b", RegexOption.IGNORE_CASE).containsMatchIn(name)
+            else -> false
+        }
+    }
+
     fun title(key: String): String = regions.firstOrNull { it.key == key }?.title ?: "其他"
 }

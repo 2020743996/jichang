@@ -91,6 +91,8 @@ data class ConfigProfile(
     val enabledRegions: Set<String> = setOf("hk", "tw", "jp", "sg", "us", "kr", "other"),
     val regionOverrides: Map<String, String> = emptyMap(),
     val templateId: String? = null,
+    /** Template proxy-provider name to an existing shared subscription source ID. */
+    val templateProviderBindings: Map<String, String> = emptyMap(),
 )
 
 data class ConfigTemplate(
