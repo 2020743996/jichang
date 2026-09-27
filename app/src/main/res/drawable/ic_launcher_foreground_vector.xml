@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- A small network path under the mascot, with its final node as the target. -->
+    <path
+        android:pathData="M25,70 C31,79 40,83 51,81 C64,79 74,71 82,59"
+        android:strokeColor="#6FE0CC"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M25,70m-4,0a4,4 0,1 0,8 0a4,4 0,1 0,-8 0"
+        android:fillColor="#6FE0CC"
+        android:strokeColor="#342A3D"
+        android:strokeWidth="2" />
+    <path
+        android:pathData="M51,81m-4,0a4,4 0,1 0,8 0a4,4 0,1 0,-8 0"
+        android:fillColor="#6FE0CC"
+        android:strokeColor="#342A3D"
+        android:strokeWidth="2" />
+
+    <!-- Rounded chick silhouette. -->
+    <path
+        android:pathData="M29,65 C24,57 25,45 31,38 C34,34 38,32 42,31 C45,25 50,23 54,27 C57,29 58,31 59,33 C69,33 76,41 76,51 C78,62 71,70 61,73 L39,73 C34,73 31,70 29,65 Z"
+        android:fillColor="#FFC84F"
+        android:strokeColor="#4A3038"
+        android:strokeWidth="3.5"
+        android:strokeLineJoin="round" />
+
+    <!-- Comb -->
+    <path
+        android:pathData="M43,32 C40,28 41,24 44,23 C47,22 49,25 50,29 C52,24 55,23 57,25 C59,28 57,32 54,35 Z"
+        android:fillColor="#F47955"
+        android:strokeColor="#4A3038"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round" />
+
+    <!-- Wing -->
+    <path
+        android:pathData="M34,53 C38,46 44,42 51,43 C58,44 62,49 60,55 C58,62 51,65 44,62 C39,60 36,57 34,53 Z"
+        android:fillColor="#FFD975"
+        android:strokeColor="#E5A934"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round" />
+
+    <!-- Eye and beak aimed at the route node. -->
+    <path
+        android:pathData="M75,48 L83,54 L74,59 Z"
+        android:fillColor="#F47955"
+        android:strokeColor="#4A3038"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M66,43m-2.7,0a2.7,2.7 0,1 0,5.4 0a2.7,2.7 0,1 0,-5.4 0"
+        android:fillColor="#342A3D" />
+
+    <!-- Final route node, read as both a network endpoint and the chick's target. -->
+    <path
+        android:pathData="M82,59m-5,0a5,5 0,1 0,10 0a5,5 0,1 0,-10 0"
+        android:fillColor="#6FE0CC"
+        android:strokeColor="#342A3D"
+        android:strokeWidth="2.5" />
+</vector>

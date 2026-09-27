@@ -37,6 +37,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -117,6 +118,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
@@ -1054,8 +1056,8 @@ private fun RulesPage(
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(query, { query = it; selectedRules = emptySet() }, Modifier.weight(1f), label = { Text("搜索规则") }, singleLine = true)
-                        Button(onClick = onAddRule) { Icon(Icons.Outlined.Add, null); Text("规则") }
+                        OutlinedTextField(query, { query = it; selectedRules = emptySet() }, Modifier.weight(1f).heightIn(min = 56.dp), label = { Text("搜索规则") }, singleLine = true)
+                        Button(onClick = onAddRule, modifier = Modifier.heightIn(min = 56.dp)) { Icon(Icons.Outlined.Add, null); Text("规则") }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${visibleRules.size} 条规则", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1141,8 +1143,8 @@ private fun RulesPage(
             }
             val providers = state.ruleProfile.providers.filter { provider -> when (providerFilter) {
                 "来自模板" -> provider.sourceTemplateId != null
-                "远程" -> provider.type == "http"
-                "本机" -> provider.type != "http"
+                "远程" -> provider.sourceTemplateId == null && provider.type == "http"
+                "本机" -> provider.sourceTemplateId == null && provider.type != "http"
                 else -> true
             } }
             if (providers.isEmpty()) EmptyCard("没有规则集", if (state.ruleProfile.providers.isEmpty()) "可从模板应用，或添加远程和本机规则集。" else "当前来源没有规则集。")
@@ -1150,10 +1152,15 @@ private fun RulesPage(
                 items(providers, key = { it.id }) { provider ->
                     val status = state.ruleProviderStatuses.firstOrNull { it.profileId == state.activeProfile.id && it.providerId == provider.id }
                     val refreshing = provider.id in viewModel.refreshingRuleProviderIds
+                    val originLabel = when {
+                        provider.sourceTemplateId != null -> "来自模板${provider.sourceTemplateName?.let { " · $it" }.orEmpty()}"
+                        provider.type == "http" -> "远程"
+                        else -> "本机"
+                    }
                     Card(colors = CardDefaults.cardColors(containerColor = if (focusedProviderId == provider.id) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(provider.name, style = MaterialTheme.typography.titleSmall)
-                            Text("${provider.sourceTemplateName ?: if (provider.type == "http") "远程" else "本机"} · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$originLabel · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}" } ?: if (provider.type == "inline") "内嵌 ${provider.payload.size} 项" else "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                             Row {
                                 if (provider.type == "http") TextButton(enabled = !refreshing, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
@@ -1867,6 +1874,13 @@ private fun GroupDialog(
     val nodeNames = eligibleNodes.associate { "node:${it.id}" to it.name }
     val availableGroups = state.ruleProfile.groups.filter { it.name != initial?.name }
     val validMemberKeys = nodeNames.keys + availableGroups.map { it.name } + setOf("DIRECT", "REJECT")
+    val groupTypes = listOf(
+        "select" to ("手动选择" to "在成员中手动选择出口"),
+        "url-test" to ("延迟优选" to "自动选择响应更快的成员"),
+        "fallback" to ("故障切换" to "当前成员不可用时切换到其他成员"),
+        "load-balance" to ("负载均衡" to "在可用成员间分配连接"),
+    )
+    val selectedGroupType = groupTypes.firstOrNull { it.first == type } ?: groupTypes.first()
     var members by remember(initial?.name, state.nodes, state.ruleProfile.groups, profile.enabledNodeIds, profile.selectedSourceIds) {
         val initialMembers = initial?.let { group ->
             when {
@@ -1887,65 +1901,115 @@ private fun GroupDialog(
         saveLabel = if (initial == null) "添加" else "保存",
         onDismiss = onDismiss,
         onSave = { onSave(name, type, members.toList(), selectedRules, selectedProviders) },
-        content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
-            Box {
-                OutlinedButton(onClick = { expanded = true }) { Text("类型：$type") }
-                DropdownMenu(expanded, { expanded = false }) {
-                    listOf("select", "url-test", "fallback", "load-balance").forEach { option -> DropdownMenuItem(text = { Text(option) }, onClick = { type = option; expanded = false }) }
+        content = { Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("策略类型", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Box {
+                        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                                Text(selectedGroupType.second.first, style = MaterialTheme.typography.bodyLarge)
+                                Text(selectedGroupType.second.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "选择策略类型")
+                        }
+                        DropdownMenu(expanded, { expanded = false }) {
+                            groupTypes.forEach { (value, details) ->
+                                DropdownMenuItem(
+                                    text = { Column {
+                                        Text(details.first)
+                                        Text(details.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    } },
+                                    onClick = { type = value; expanded = false },
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            Text("代理成员", style = MaterialTheme.typography.titleSmall)
-            Text("仅显示当前配置启用的节点和策略组。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Column(Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("代理成员", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                    Text("${members.size} 项已选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                }
+                Text("选择此组可使用的节点、其他策略组或系统出口。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (eligibleNodes.isEmpty()) Text("当前配置没有已启用节点，可到“资源 → 节点”启用。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 eligibleNodes.forEach { node ->
                     val key = "node:${node.id}"
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = key in members, onCheckedChange = { checked ->
-                            members = if (checked) members + key else members - key
-                        })
-                        Text(node.name, style = MaterialTheme.typography.bodySmall)
+                    GroupSelectionRow(node.name, key in members) { checked ->
+                        members = if (checked) members + key else members - key
                     }
                 }
                 availableGroups.forEach { group ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = group.name in members, onCheckedChange = { checked ->
-                            members = if (checked) members + group.name else members - group.name
-                        })
-                        Text("策略组 · ${group.name}", style = MaterialTheme.typography.bodySmall)
+                    GroupSelectionRow("策略组 · ${group.name}", group.name in members) { checked ->
+                        members = if (checked) members + group.name else members - group.name
                     }
                 }
                 listOf("DIRECT", "REJECT").forEach { special ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = special in members, onCheckedChange = { checked ->
-                            members = if (checked) members + special else members - special
-                        })
-                        Text(special, style = MaterialTheme.typography.bodySmall)
+                    GroupSelectionRow(special, special in members) { checked ->
+                        members = if (checked) members + special else members - special
                     }
                 }
             }
             if (initial == null) {
-                Text("规则目标", style = MaterialTheme.typography.titleSmall)
-                Text("所选规则会改用新策略组；规则集会新增或更新对应的 RULE-SET 规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("规则目标", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                        Text("${selectedRules.size + selectedProviders.size} 项已选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    Text("勾选后会把这些规则的目标设为新策略组，并为所选规则集添加路由规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     state.ruleProfile.rules.forEachIndexed { index, rule ->
-                        if (!rule.type.equals("MATCH", true)) Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = index in selectedRules, onCheckedChange = { checked ->
-                                selectedRules = if (checked) selectedRules + index else selectedRules - index
-                            })
-                            Text("${rule.type} · ${ruleSummary(rule)} → ${rule.group}", style = MaterialTheme.typography.bodySmall)
+                        if (!rule.type.equals("MATCH", true)) GroupSelectionRow(
+                            title = rule.type,
+                            supportingText = "${ruleSummary(rule)} → ${rule.group}",
+                            checked = index in selectedRules,
+                        ) { checked ->
+                            selectedRules = if (checked) selectedRules + index else selectedRules - index
                         }
                     }
-                    state.ruleProfile.providers.forEach { provider -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = provider.id in selectedProviders, onCheckedChange = { checked ->
+                    state.ruleProfile.providers.forEach { provider ->
+                        GroupSelectionRow("规则集 · ${provider.name}", provider.id in selectedProviders) { checked ->
                             selectedProviders = if (checked) selectedProviders + provider.id else selectedProviders - provider.id
-                        })
-                        Text("规则集 · ${provider.name}", style = MaterialTheme.typography.bodySmall)
-                    } }
+                        }
+                    }
+                    if (state.ruleProfile.rules.none { !it.type.equals("MATCH", true) } && state.ruleProfile.providers.isEmpty()) {
+                        Text("暂无可应用的规则或规则集。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
+            Spacer(Modifier.height(4.dp))
         } },
     )
+}
+
+@Composable
+private fun GroupSelectionRow(
+    title: String,
+    checked: Boolean,
+    supportingText: String? = null,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).toggleable(
+            value = checked,
+            role = Role.Checkbox,
+            onValueChange = onCheckedChange,
+        ).padding(end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = null)
+        Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            supportingText?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
 }
 
 private val visualRuleTypes = listOf(
@@ -1987,6 +2051,7 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
         content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("规则类型", style = MaterialTheme.typography.labelLarge)
                 OutlinedButton(onClick = { showTypePicker = true }, modifier = Modifier.fillMaxWidth()) { Text(if (type == "MATCH") "MATCH · 最终兜底" else type) }
+                Text(ruleTypeDescription(type), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 when {
                     type == "MATCH" -> Text("MATCH 会被固定在规则列表末尾。", style = MaterialTheme.typography.bodySmall)
                     composite -> Text("此规则包含组合条件，请展开高级条件编辑条件树。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2101,17 +2166,45 @@ private fun ApplyDialogGlassBlur() {
     }
 }
 
-private fun ruleTypeDescription(type: String): String = when {
-    type.startsWith("DOMAIN") -> "按域名匹配"
-    type == "GEOSITE" -> "按 Mihomo geodata 分类匹配"
-    type.contains("IP") || type.contains("GEO") -> "按 IP 地址或地理信息匹配"
-    type.contains("PORT") -> "按连接端口匹配"
-    type.startsWith("PROCESS") || type == "UID" -> "按发起连接的进程匹配"
-    type == "RULE-SET" -> "引用已配置的规则集提供者"
-    type == "SUB-RULE" -> "进入本地子规则集合"
-    type in setOf("AND", "OR", "NOT") -> "组合多个条件进行逻辑匹配"
-    type == "MATCH" -> "匹配其余所有流量并作为最后一条规则"
-    else -> "Mihomo $type 匹配类型"
+private fun ruleTypeDescription(type: String): String = when (type) {
+    "DOMAIN" -> "完整域名精确匹配。例如 example.com 不会匹配 www.example.com。"
+    "DOMAIN-SUFFIX" -> "匹配域名本身及其子域名。例如 example.com 可匹配 www.example.com。"
+    "DOMAIN-KEYWORD" -> "域名中包含指定文字即匹配。例如填写 google 可匹配含 google 的域名。"
+    "DOMAIN-WILDCARD" -> "按域名通配符匹配；仅支持 *（任意长度）和 ?（单个字符）。例如 *.example.com。"
+    "DOMAIN-REGEX" -> "用正则表达式匹配完整域名。适合需要组合条件的场景；例如 ^.+\\.example\\.com$。"
+    "GEOSITE" -> "按 Mihomo 的 Geosite 域名分类匹配。例如 cn、google、category-ads-all。"
+    "IP-CIDR" -> "按目标 IPv4 网段匹配，使用 CIDR 写法，例如 192.168.0.0/16。可在高级选项设置 no-resolve。"
+    "IP-CIDR6" -> "按目标 IPv6 网段匹配，使用 CIDR 写法，例如 2001:db8::/32。可在高级选项设置 no-resolve。"
+    "IP-SUFFIX" -> "按目标 IP 后缀范围匹配，填写 IP 网段，例如 8.8.8.0/24。"
+    "IP-ASN" -> "按目标 IP 所属自治系统编号（ASN）匹配，例如 13335。"
+    "GEOIP" -> "按目标 IP 的国家或地区代码匹配，例如 CN。"
+    "SRC-GEOIP" -> "按来源 IP 的国家或地区代码匹配，例如 CN。"
+    "SRC-IP-ASN" -> "按来源 IP 所属自治系统编号（ASN）匹配，例如 9808。"
+    "SRC-IP-CIDR" -> "按来源 IPv4 网段匹配，使用 CIDR 写法，例如 192.168.1.0/24。"
+    "SRC-IP-SUFFIX" -> "按来源 IP 后缀范围匹配，填写 IP 网段，例如 192.168.1.0/24。"
+    "DST-PORT" -> "按连接的目标端口或端口范围匹配，例如 443 或 80-443。"
+    "SRC-PORT" -> "按发起连接时使用的来源端口或端口范围匹配，例如 50000-60000。"
+    "IN-PORT" -> "按 Mihomo 接收连接的入站端口匹配，也支持端口范围，例如 7890 或 7890-7900。"
+    "IN-TYPE" -> "按接收连接的入站类型匹配，例如 SOCKS、HTTP 或 mixed。"
+    "IN-USER" -> "按入站认证用户名匹配；多个用户名可用 / 分隔。"
+    "IN-NAME" -> "按接收连接的入站名称匹配。"
+    "REMATCH-NAME" -> "按 Rematch 出站写入的名称匹配。"
+    "PROCESS-PATH" -> "按进程完整路径精确匹配，例如 /usr/bin/curl。"
+    "PROCESS-PATH-WILDCARD" -> "按进程路径通配符匹配；仅支持 * 和 ?，例如 /usr/*/curl。"
+    "PROCESS-PATH-REGEX" -> "用正则表达式匹配进程完整路径，例如 .*/bin/curl$。"
+    "PROCESS-NAME" -> "按进程名称精确匹配；Android 上可填写应用包名，例如 com.example.app。"
+    "PROCESS-NAME-WILDCARD" -> "按进程名称通配符匹配；仅支持 * 和 ?，Android 上也可匹配包名。"
+    "PROCESS-NAME-REGEX" -> "用正则表达式匹配进程名称；Android 上也可匹配应用包名。"
+    "UID" -> "按 Linux 用户 ID 匹配，填写数字，例如 1001。"
+    "NETWORK" -> "按连接协议匹配，填写 tcp 或 udp。"
+    "DSCP" -> "按数据包 DSCP 标记匹配，仅适用于 TProxy 的 UDP 入站。"
+    "RULE-SET" -> "引用规则集中的匹配项；先在“规则 → 规则集”添加规则集，再选择名称。"
+    "SUB-RULE" -> "引用已创建的子规则集合；匹配结果使用子规则中对应的目标策略。"
+    "AND" -> "所有子条件都匹配时才命中。适合组合域名、网络等多个条件。"
+    "OR" -> "任意一个子条件匹配时即命中。适合多个可选匹配条件。"
+    "NOT" -> "子条件不匹配时命中，用于排除某类请求。"
+    "MATCH" -> "无条件匹配剩余请求；始终作为最后一条规则。"
+    else -> "Mihomo 规则类型 $type。请按该类型要求填写匹配值。"
 }
 
 @Composable
