@@ -1,9 +1,11 @@
 package com.jzb.jichang.android
 
+import android.Manifest
 import android.content.Intent
 import android.content.ContentValues
 import android.content.Context
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -17,6 +19,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -166,6 +169,8 @@ import com.jzb.jichang.android.service.LanShareQrCode
 import com.jzb.jichang.android.service.MihomoSettings
 import com.jzb.jichang.android.service.MihomoNodeOptionsYaml
 import com.jzb.jichang.android.share.LocalShareController
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -2100,27 +2105,49 @@ private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val context = LocalContext.current
     var raw by remember { mutableStateOf("") }
     var scanError by remember { mutableStateOf<String?>(null) }
-    val scanner = remember(context) {
-        val options = com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions.Builder()
-            .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
-            .enableAutoZoom()
-            .build()
-        com.google.mlkit.vision.codescanner.GmsBarcodeScanning.getClient(context, options)
+    var permissionDenied by remember { mutableStateOf(false) }
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { scanned ->
+            if (scanned.isBlank()) scanError = "二维码没有可导入的内容"
+            else {
+                raw = scanned
+                scanError = null
+            }
+        }
+    }
+    fun openScanner() {
+        scanError = null
+        permissionDenied = false
+        runCatching {
+            scanner.launch(
+                ScanOptions()
+                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("将节点二维码放入取景框")
+                    .setBeepEnabled(false)
+                    .setCaptureActivity(NodeCaptureActivity::class.java),
+            )
+        }.onFailure { scanError = "无法打开相机，请重试或粘贴节点内容。" }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        permissionDenied = !granted
+        if (granted) openScanner()
+        else scanError = "需要相机权限才能扫码；您也可以粘贴节点内容。"
     }
     JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("导入节点") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("粘贴或扫描 Mihomo/Clash 节点内容、节点分享链接。机场订阅二维码请在订阅页添加；没有 Google Play 服务时可直接粘贴。")
+            Text("粘贴或扫描 Mihomo/Clash 节点内容、节点分享链接。机场订阅二维码请在订阅页添加。")
             OutlinedButton(
                 onClick = {
                     scanError = null
-                    scanner.startScan()
-                        .addOnSuccessListener { barcode ->
-                            barcode.rawValue?.takeIf(String::isNotBlank)?.let { raw = it; scanError = null }
-                                ?: run { scanError = "二维码没有可导入的内容" }
-                        }
-                        .addOnFailureListener { error -> scanError = error.localizedMessage ?: "无法启动扫码，请改用粘贴导入" }
+                    when {
+                        !context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) ->
+                            scanError = "设备没有可用相机，请粘贴节点内容。"
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED ->
+                            openScanner()
+                        else -> cameraPermission.launch(Manifest.permission.CAMERA)
+                    }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -2129,6 +2156,9 @@ private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
                 Text("扫描节点二维码")
             }
             scanError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            if (permissionDenied) TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+            }) { Text("打开应用设置授权") }
             OutlinedTextField(raw, { raw = it }, Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 240.dp), label = { Text("节点内容") }, minLines = 6)
         } },
         confirmButton = { TextButton(onClick = { onSave(raw) }, enabled = raw.isNotBlank()) { Text("解析并添加") } },

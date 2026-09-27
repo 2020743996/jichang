@@ -4,7 +4,7 @@
 
 ## 当前功能
 
-- 本机添加和刷新 HTTP(S) 订阅；节点可粘贴或扫码导入 Mihomo/Clash YAML、Base64、常见节点分享 URI 与基础 Surge 节点行。扫码使用 Google Play 服务，设备不支持时仍可粘贴导入。
+- 本机添加和刷新 HTTP(S) 订阅；节点可粘贴或扫码导入 Mihomo/Clash YAML、Base64、常见节点分享 URI 与基础 Surge 节点行。扫码直接使用设备相机，首次使用时请求系统相机权限；设备没有相机或拒绝授权时仍可粘贴导入。
 - 概览、资源、规则、分享四个入口；资源内分为订阅、节点和模板，配置仍可创建、复制、切换、重命名和删除。
 - 订阅和节点库共享；每份配置独立选择订阅、节点、规则、地区分组和导出选项。
 - 节点支持搜索、来源/协议/启用状态/地区筛选、批量启停、编辑和按当前配置调整地区归属。
@@ -23,6 +23,7 @@
 - 分享地址从 Android 当前 Wi-Fi 或以太网连接中读取；访客网络、客户端 VPN 和 AP 隔离可能阻止局域网设备互访。
 - 导航和分段控件使用鸡场自有的 AGSL GPU 液态玻璃，包括局部背景采样、微折射、高光与可调透明度，配置内容保持清晰可读。
 - 二维码由 ZXing Core 生成；其 Apache-2.0 许可证及上游随附的 jai-imageio 声明随应用一同分发，见 `app/src/main/assets/licenses/ZXing-LICENSE.txt`。
+- 扫码使用 ZXing Android Embedded；其 Apache-2.0 版权声明随应用一同分发，见 `app/src/main/assets/licenses/ZXing-Android-Embedded-NOTICE.txt`。
 - 应用图标以啄向路由节点的小鸡表现鸡场的订阅与节点管理，使用 Android 自适应图标。
 - 所有数据通过 Room 保存在本机，不启用云同步或第三方转换服务。
 
@@ -32,7 +33,7 @@
 
 请从 GitHub Releases 下载并安装 Android APK。本仓库发布应用源码与安装包，不附带构建脚本。
 
-当前发布版为鸡场 0.9.3，要求 Android 13（API 33）或更高版本，以启用 Android 图形着色语言（AGSL）玻璃渲染。
+当前发布版为鸡场 0.9.4，要求 Android 13（API 33）或更高版本，以启用 Android 图形着色语言（AGSL）玻璃渲染。
 
 ## 局域网分享
 

@@ -7,3 +7,5 @@ local.properties
 captures/
 .DS_Store
 .agents/
+/app/src/test/
+/app/src/androidTest/
