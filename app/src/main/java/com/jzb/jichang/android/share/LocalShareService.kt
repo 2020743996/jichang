@@ -18,6 +18,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.io.ByteArrayInputStream
+import java.io.OutputStream
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -161,19 +162,27 @@ class LocalShareService : Service() {
             } == true
             val encoded = payload.encode(acceptsGzip)
             val bytes = encoded.bytes
-            val response = newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", ByteArrayInputStream(bytes), bytes.size.toLong()).apply {
-                addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
-                addHeader("X-Content-Type-Options", "nosniff")
-                addHeader("Vary", "Accept-Encoding")
-                addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(payload.filename, "UTF-8").replace("+", "%20")}")
-                if (encoded.compressed) addHeader("Content-Encoding", "gzip")
+            return object : Response(Response.Status.OK, "text/yaml; charset=utf-8", ByteArrayInputStream(bytes), bytes.size.toLong()) {
+                init {
+                    addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
+                    addHeader("X-Content-Type-Options", "nosniff")
+                    addHeader("Vary", "Accept-Encoding")
+                    addHeader("Content-Disposition", "attachment; filename*=UTF-8''${java.net.URLEncoder.encode(payload.filename, "UTF-8").replace("+", "%20")}")
+                    if (encoded.compressed) addHeader("Content-Encoding", "gzip")
+                }
+
+                override fun send(outputStream: OutputStream) {
+                    try {
+                        super.send(outputStream)
+                    } finally {
+                        if (session.method == Method.GET) {
+                            val latest = ShareTransferStats(bytes.size, (System.nanoTime() - started) / 1_000_000, encoded.compressed)
+                            stats.value = latest
+                            onStats(latest)
+                        }
+                    }
+                }
             }
-            if (session.method == Method.GET) {
-                val latest = ShareTransferStats(bytes.size, (System.nanoTime() - started) / 1_000_000, encoded.compressed)
-                stats.value = latest
-                onStats(latest)
-            }
-            return response
         }
     }
 
