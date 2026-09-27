@@ -50,10 +50,16 @@ class SubscriptionRepositoryTest {
         val raw = """
             mixed-port: 7891
             proxies:
-              - {name: Tokyo, type: ss, server: tokyo.example, port: 443, cipher: aes-128-gcm, password: secret}
+            - {name: Tokyo, type: ss, server: tokyo.example, port: 443, cipher: aes-128-gcm, password: secret}
+            rule-providers:
+              ads:
+                type: http
+                behavior: domain
+                url: https://rules.example/ads.yaml
             proxy-groups:
               - {name: PROXY, type: select, proxies: [Tokyo, DIRECT]}
             rules:
+              - RULE-SET,ads,PROXY
               - MATCH,PROXY
         """.trimIndent()
         try {
@@ -65,6 +71,8 @@ class SubscriptionRepositoryTest {
             assertEquals(templateId, profile.templateId)
             assertEquals(1, repository.state.value.nodes.size)
             assertEquals(setOf(repository.state.value.nodes.single().id), profile.enabledNodeIds)
+            assertEquals(templateId, profile.ruleProfile.providers.single().sourceTemplateId)
+            assertEquals("Tokyo base", profile.ruleProfile.providers.single().sourceTemplateName)
             assertTrue(runCatching { repository.deleteTemplate(templateId) }.isFailure)
 
             repository.deleteProfile(profile.id)

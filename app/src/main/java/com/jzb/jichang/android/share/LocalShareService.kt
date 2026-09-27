@@ -12,6 +12,8 @@ import android.net.NetworkCapabilities
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.net.wifi.WifiManager
 import com.jzb.jichang.android.MainActivity
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
@@ -23,6 +25,9 @@ import java.util.Base64
 class LocalShareService : Service() {
     private val binder = LocalBinder()
     private var server: ConfigServer? = null
+    private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var wifiLowLatencyLock: WifiManager.WifiLock? = null
+    private var wifiBackgroundLock: WifiManager.WifiLock? = null
     @Volatile private var sharedConfig: Pair<String, String>? = null
     var currentUrl: String? = null
         private set
@@ -55,10 +60,18 @@ class LocalShareService : Service() {
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes)
         sharedConfig = config to filename
         val active = ConfigServer(address, token) { sharedConfig ?: ("" to "鸡场.yaml") }
-        active.start(5_000, false)
-        server = active
-        currentUrl = "http://$address:${active.listeningPort}/$token/config.yaml"
-        return currentUrl!!
+        try {
+            active.start(5_000, false)
+            acquireShareLocks()
+            server = active
+            currentUrl = "http://$address:${active.listeningPort}/$token/config.yaml"
+            return currentUrl!!
+        } catch (error: Throwable) {
+            active.stop()
+            releaseShareLocks()
+            sharedConfig = null
+            throw error
+        }
     }
 
     fun stopSharing() {
@@ -66,6 +79,7 @@ class LocalShareService : Service() {
         server = null
         sharedConfig = null
         currentUrl = null
+        releaseShareLocks()
     }
 
     fun updateConfig(config: String, filename: String) { if (currentUrl != null) sharedConfig = config to filename }
@@ -73,6 +87,40 @@ class LocalShareService : Service() {
     override fun onDestroy() {
         stopSharing()
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireShareLocks() {
+        val powerManager = getSystemService(PowerManager::class.java)
+        if (cpuWakeLock?.isHeld != true) {
+            cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:lan-share").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+
+        val wifiManager = getSystemService(WifiManager::class.java) ?: return
+        if (wifiLowLatencyLock == null) {
+            wifiLowLatencyLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "$packageName:lan-share-low-latency").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (wifiBackgroundLock == null) {
+            wifiBackgroundLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:lan-share-background").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    private fun releaseShareLocks() {
+        runCatching { if (wifiLowLatencyLock?.isHeld == true) wifiLowLatencyLock?.release() }
+        runCatching { if (wifiBackgroundLock?.isHeld == true) wifiBackgroundLock?.release() }
+        runCatching { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() }
+        wifiLowLatencyLock = null
+        wifiBackgroundLock = null
+        cpuWakeLock = null
     }
 
     @Suppress("DEPRECATION")

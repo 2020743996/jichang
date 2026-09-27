@@ -157,7 +157,11 @@ class JichangRepository(private val dao: SnapshotDao) {
             name = cleanName,
             fileName = fileName.trim().ifBlank { cleanName },
             enabledNodeIds = importedNodes.map { it.id }.toSet(),
-            ruleProfile = parsed.ruleProfile,
+            ruleProfile = parsed.ruleProfile.copy(
+                providers = parsed.ruleProfile.providers.map { provider ->
+                    provider.copy(sourceTemplateId = template.id, sourceTemplateName = template.name)
+                },
+            ),
             templateId = template.id,
         )
         state.copy(nodes = state.nodes + importedNodes, profiles = state.profiles + profile, activeProfileId = profile.id)
