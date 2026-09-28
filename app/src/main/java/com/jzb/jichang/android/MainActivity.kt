@@ -1366,6 +1366,7 @@ private fun RulesPage(
             }
         }
         RuleSection.Providers -> Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal)) {
+            Text("从模板应用已有规则集，或添加远程下载地址、本机规则项。保存规则集后，还需在规则列表添加 RULE-SET 规则并选择目标策略。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("规则集来源", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Box {
@@ -1377,8 +1378,12 @@ private fun RulesPage(
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { ChoiceMenu(providerFilter, listOf("全部来源", "来自模板", "远程", "本机"), { providerFilter = it }, Modifier.fillMaxWidth()) }
+            ChoiceMenu(providerFilter, listOf("全部来源", "来自模板", "远程", "本机"), { providerFilter = it }, Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    enabled = state.ruleProfile.providers.any { it.type.equals("http", true) } && !viewModel.refreshingAllRuleProviders && viewModel.refreshingRuleProviderIds.isEmpty(),
+                    onClick = { viewModel.refreshAllRuleProviders(state.activeProfile) },
+                ) { Text(if (viewModel.refreshingAllRuleProviders) "刷新中…" else "刷新全部远程") }
                 TextButton(onClick = { onProviders(null) }) { Text("管理") }
             }
             val providers = state.ruleProfile.providers.filter { provider -> when (providerFilter) {
@@ -1403,7 +1408,7 @@ private fun RulesPage(
                             Text("$originLabel · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}" } ?: if (provider.type == "inline") "内嵌 ${provider.payload.size} 项" else "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                             Row {
-                                if (provider.type == "http") TextButton(enabled = !refreshing, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
+                                if (provider.type == "http") TextButton(enabled = !refreshing && !viewModel.refreshingAllRuleProviders, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
                                 TextButton(onClick = { viewModel.previewRuleProvider(state.activeProfile, provider, status) }) { Text("预览") }
                                 TextButton(onClick = { onProviders("edit:${provider.id}") }) { Text("编辑") }
                             }
@@ -1476,7 +1481,7 @@ private fun RulesPage(
         text = { Text("主规则和子规则中指向“${group.name}”的目标都会改为其他现有策略组。") },
         confirmButton = { TextButton(onClick = { viewModel.removeGroup(group.name); groupToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { groupToDelete = null }) { Text("取消") } }) }
-    if (showSimulator) RuleSimulationDialog(state.ruleProfile, onDismiss = { showSimulator = false })
+    if (showSimulator) RuleSimulationDialog(state.activeProfile, state.ruleProviderStatuses, onDismiss = { showSimulator = false })
     if (showTemplateRuleSetApply) TemplateRuleSetApplyDialog(templates = state.templates, current = state.ruleProfile,
         onDismiss = { showTemplateRuleSetApply = false }, onApply = { updated -> onSaveRuleProfile(updated); showTemplateRuleSetApply = false })
     viewModel.ruleProviderPreview?.let { (name, content) -> JichangAlertDialog(onDismissRequest = viewModel::dismissRuleProviderPreview,
@@ -1590,17 +1595,22 @@ private fun TemplateRuleSetApplyDialog(
 }
 
 @Composable
-private fun RuleSimulationDialog(profile: com.jzb.jichang.android.model.RuleProfile, onDismiss: () -> Unit) {
+private fun RuleSimulationDialog(profile: ConfigProfile, statuses: List<com.jzb.jichang.android.model.RuleProviderStatus>, onDismiss: () -> Unit) {
+    val ruleProfile = profile.ruleProfile
+    val cacheDirectory = java.io.File(LocalContext.current.filesDir, "rule-providers/${profile.id}")
+    val scope = rememberCoroutineScope()
     var host by remember { mutableStateOf("") }
     var destinationPort by remember { mutableStateOf("") }
     var sourcePort by remember { mutableStateOf("") }
     var network by remember { mutableStateOf("") }
     var processName by remember { mutableStateOf("") }
     var result by remember { mutableStateOf<com.jzb.jichang.android.service.RuleSimulationResult?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var cacheSummary by remember { mutableStateOf<String?>(null) }
     val certainty = result?.certainty
     JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("规则模拟 · 静态推演") }, text = {
         Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("仅按当前规则和已填写条件推演，不代表 Mihomo 运行时结果。GeoIP、GeoSite 和外部规则集等缺少数据时会标记为未知。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("按当前规则及本机已保存的 YAML/文本规则集推演。未刷新、MRS 格式及 Geo 数据等无法读取的条件会标记为未知；结果不代表 Mihomo 运行时。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(host, { host = it }, Modifier.fillMaxWidth(), label = { Text("域名或目标 IP") }, singleLine = true)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(destinationPort, { destinationPort = it.filter(Char::isDigit) }, Modifier.weight(1f), label = { Text("目标端口") }, singleLine = true)
@@ -1608,13 +1618,40 @@ private fun RuleSimulationDialog(profile: com.jzb.jichang.android.model.RuleProf
             }
             SelectField("网络协议", network.ifBlank { "不指定" }, listOf("不指定", "TCP", "UDP")) { network = if (it == "不指定") "" else it }
             OutlinedTextField(processName, { processName = it }, Modifier.fillMaxWidth(), label = { Text("进程名（可选）") }, singleLine = true)
-            OutlinedButton(enabled = host.isNotBlank(), onClick = {
-                result = com.jzb.jichang.android.service.RuleSimulator.simulate(profile, com.jzb.jichang.android.service.RuleSimulationInput(
+            OutlinedButton(enabled = host.isNotBlank() && !loading, onClick = {
+                val input = com.jzb.jichang.android.service.RuleSimulationInput(
                     hostOrIp = host,
                     destinationPort = destinationPort.toIntOrNull(), sourcePort = sourcePort.toIntOrNull(),
                     network = network.takeIf(String::isNotBlank), processName = processName.takeIf(String::isNotBlank),
-                ))
-            }, modifier = Modifier.fillMaxWidth()) { Text("模拟") }
+                )
+                loading = true
+                result = null
+                scope.launch {
+                    try {
+                        val (outcome, summary) = withContext(Dispatchers.IO) {
+                            val reader = com.jzb.jichang.android.service.RuleProviderRefresher()
+                            val localRuleSets = mutableMapOf<String, List<String>>()
+                            val unavailable = mutableListOf<String>()
+                            val referencedNames = ruleProfile.rules.filter { it.type.equals("RULE-SET", true) }.map { it.value }.toSet()
+                            ruleProfile.providers.filter { it.name in referencedNames && !it.type.equals("inline", true) }.forEach { provider ->
+                                val status = statuses.firstOrNull { it.profileId == profile.id && it.providerId == provider.id }
+                                val entries = runCatching { reader.simulationEntries(provider, cacheDirectory, status?.cacheFileName) }.getOrNull()
+                                if (entries == null) unavailable += provider.name else localRuleSets[provider.id] = entries
+                            }
+                            val simulation = com.jzb.jichang.android.service.RuleSimulator.simulate(ruleProfile, input, localRuleSets)
+                            val cacheInfo = if (unavailable.isEmpty()) null else "未读取的规则集：${unavailable.joinToString("、")}。相关规则按未知处理，可先刷新远程规则集。"
+                            simulation to cacheInfo
+                        }
+                        result = outcome
+                        cacheSummary = summary
+                    } catch (error: Exception) {
+                        cacheSummary = "模拟失败：${error.message ?: "无法读取规则"}"
+                    } finally {
+                        loading = false
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text(if (loading) "模拟中…" else "模拟") }
+            cacheSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             result?.let { outcome ->
                 Card(colors = CardDefaults.cardColors(containerColor = when (outcome.certainty) { com.jzb.jichang.android.service.RuleSimulationCertainty.DEFINITE -> MaterialTheme.colorScheme.primaryContainer; com.jzb.jichang.android.service.RuleSimulationCertainty.NO_MATCH -> MaterialTheme.colorScheme.surfaceVariant; else -> MaterialTheme.colorScheme.tertiaryContainer })) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1625,7 +1662,7 @@ private fun RuleSimulationDialog(profile: com.jzb.jichang.android.model.RuleProf
                 }
                 if (outcome.uncertainIndexes.isNotEmpty()) {
                     Text("可能改变结论的规则", style = MaterialTheme.typography.labelLarge)
-                    outcome.uncertainIndexes.forEach { index -> profile.rules.getOrNull(index)?.let { Text("第 ${index + 1} 条 · ${it.type} → ${it.group} · 依赖外部数据或未提供条件", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+                    outcome.uncertainIndexes.forEach { index -> ruleProfile.rules.getOrNull(index)?.let { Text("第 ${index + 1} 条 · ${it.type} → ${it.group} · 依赖外部数据或未提供条件", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
                 }
             }
         }
@@ -2645,15 +2682,23 @@ private fun RuleProviderEditor(initial: RuleProvider, onDismiss: () -> Unit, onS
     val draft = initial.copy(name = name.trim(), type = type, behavior = behavior, url = url, path = path, format = format, interval = interval.toIntOrNull() ?: 86400, payload = payload.lines().filter(String::isNotBlank), headers = parsedHeaders)
     FullScreenEditorDialog(title = "规则集", dirty = draft != initial, valid = name.isNotBlank() && (type != "http" || url.startsWith("http")) && (type != "inline" || payload.isNotBlank()),
         onDismiss = onDismiss, onSave = { onSave(draft) }, content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("规则集保存后，在规则列表添加 RULE-SET 规则才能参与分流。远程规则集需要刷新，才能在本机预览和模拟。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = { section = if (section == 0) 1 else 0 }) { Text(if (section == 0) "显示高级参数" else "收起高级参数") }
             OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
             SelectField("来源类型", type, listOf("http", "file", "inline")) { type = it }
             SelectField("匹配行为", behavior, listOf("domain", "ipcidr", "classical")) { behavior = it }
+            Text("domain 匹配域名，ipcidr 匹配 IP 网段，classical 使用 DOMAIN-SUFFIX,example.com 等完整规则项。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (type == "http") OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("下载 URL") }, singleLine = true)
             if (type == "file") OutlinedTextField(path, { path = it }, modifier = Modifier.fillMaxWidth(), label = { Text("本地文件路径（应用规则集目录内）") }, singleLine = true)
             if (type == "inline") OutlinedTextField(payload, { payload = it }, modifier = Modifier.fillMaxWidth(), label = { Text("规则项，每行一条") }, minLines = 4)
+            Text(when (type) {
+                "http" -> "填写可直接下载的 HTTP(S) 地址；保存后到规则集页刷新。"
+                "file" -> "填写应用规则集目录中的相对路径；本机文件需先放入该目录。"
+                else -> "每行填写一个匹配项；domain 可用 example.com 或 +.example.com，ipcidr 填写 IP 网段。"
+            }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (section == 1) {
             SelectField("格式", format, listOf("yaml", "text", "mrs")) { format = it }
+            Text("YAML 读取 payload 列表，text 按行读取；MRS 为二进制格式，不能用于本机规则模拟。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (type == "http") OutlinedTextField(interval, { interval = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("更新间隔（秒）") }, singleLine = true)
             if (type == "http") OutlinedTextField(path, { path = it }, modifier = Modifier.fillMaxWidth(), label = { Text("本地缓存路径") }, singleLine = true)
             if (type == "http") OutlinedTextField(headers, { headers = it }, modifier = Modifier.fillMaxWidth(), label = { Text("请求头，每行 key=value") }, minLines = 2)

@@ -483,7 +483,21 @@ class JichangRepository(private val dao: SnapshotDao) {
         profile.copy(ruleProfile = profile.ruleProfile.copy(rules = rules))
     }
 
-    suspend fun saveRuleProfile(profile: RuleProfile) = updateProfile { it.copy(ruleProfile = profile) }
+    suspend fun saveRuleProfile(profile: RuleProfile) = update { state ->
+        val active = state.activeProfile
+        val previousProviders = active.ruleProfile.providers.associateBy(RuleProvider::id)
+        val unchangedCacheIds = profile.providers.filter { updated ->
+            val previous = previousProviders[updated.id]
+            previous != null && previous.type == updated.type && previous.url == updated.url &&
+                previous.path == updated.path && previous.headers == updated.headers &&
+                previous.behavior == updated.behavior && previous.format == updated.format &&
+                previous.payload == updated.payload
+        }.map(RuleProvider::id).toSet()
+        state.copy(
+            profiles = state.profiles.map { if (it.id == active.id) it.copy(ruleProfile = profile) else it },
+            ruleProviderStatuses = state.ruleProviderStatuses.filter { it.profileId != active.id || it.providerId in unchangedCacheIds },
+        )
+    }
 
     suspend fun saveMihomoSettings(settings: Map<String, Any?>) = updateProfile {
         it.copy(mihomoSettings = MihomoSettings.normalizeVisualSettings(settings))

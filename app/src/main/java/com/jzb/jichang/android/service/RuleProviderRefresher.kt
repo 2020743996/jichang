@@ -4,6 +4,9 @@ import com.jzb.jichang.android.model.RuleProvider
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.constructor.SafeConstructor
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -26,6 +29,35 @@ class RuleProviderRefresher(
         if (provider.format.equals("mrs", true)) return "MRS 是二进制格式，已缓存 ${bytes.size} 字节；此格式无法在规则页逐行预览。"
         val text = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
         return text.lineSequence().take(MAX_PREVIEW_LINES).joinToString("\n").ifBlank { "规则集内容为空。" }
+    }
+
+    /** Reads only local content. A missing cache or an MRS binary remains unknown to the simulator. */
+    fun simulationEntries(provider: RuleProvider, cacheDirectory: File, cachedFileName: String?): List<String>? {
+        if (provider.format.equals("mrs", true)) return null
+        val bytes = when (provider.type.lowercase()) {
+            "inline" -> return provider.payload
+            "http" -> cachedFileName?.let { readCached(cacheDirectory, it) } ?: return null
+            "file" -> readLocal(provider, cacheDirectory)
+            else -> return null
+        }
+        require(bytes.size <= MAX_BYTES) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
+        val content = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
+        val entries = when (provider.format.lowercase()) {
+            "text" -> content.lineSequence().map(String::trim).filter { it.isNotBlank() && !it.startsWith("#") }.toList()
+            "yaml" -> {
+                val options = LoaderOptions().apply { maxAliasesForCollections = 30; codePointLimit = MAX_BYTES }
+                val loaded = Yaml(SafeConstructor(options)).load<Any?>(content)
+                val payload = when (loaded) {
+                    is Map<*, *> -> loaded["payload"]
+                    is List<*> -> loaded
+                    else -> null
+                }
+                (payload as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                    ?: error("YAML 规则集缺少 payload 列表")
+            }
+            else -> return null
+        }
+        return entries
     }
 
     fun refresh(provider: RuleProvider, cacheDirectory: File): RefreshedRuleProvider {

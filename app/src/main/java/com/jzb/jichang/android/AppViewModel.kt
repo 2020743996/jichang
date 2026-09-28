@@ -13,6 +13,7 @@ import com.jzb.jichang.android.model.ConfigProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.RuleProviderStatus
+import com.jzb.jichang.android.model.RuleProvider
 import com.jzb.jichang.android.service.GeneratedConfig
 import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.ConfigExportOptions
@@ -38,6 +39,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var refreshingRuleProviderIds: Set<String> by mutableStateOf(emptySet())
         private set
+    var refreshingAllRuleProviders: Boolean by mutableStateOf(false)
+        private set
     var ruleProviderPreview: Pair<String, String>? by mutableStateOf(null)
         private set
 
@@ -59,14 +62,40 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun renameTemplate(id: String, name: String) = run { repository.renameTemplate(id, name); "模板名称已更新" }
     fun deleteTemplate(id: String) = run { repository.deleteTemplate(id); "模板已删除" }
     fun updateRuleProviderStatus(status: RuleProviderStatus) = run { repository.updateRuleProviderStatus(status); null }
-    fun refreshRuleProvider(profile: ConfigProfile, provider: com.jzb.jichang.android.model.RuleProvider) = run {
+    fun refreshRuleProvider(profile: ConfigProfile, provider: RuleProvider) = run {
+        val itemCount = refreshRuleProviderNow(profile, provider)
+        "规则集已刷新${itemCount?.let { "，$it 项" }.orEmpty()}"
+    }
+    fun refreshAllRuleProviders(profile: ConfigProfile) = run {
+        val remoteProviders = profile.ruleProfile.providers.filter { it.type.equals("http", true) }
+        if (remoteProviders.isEmpty()) return@run "当前配置没有远程规则集"
+        refreshingAllRuleProviders = true
+        var refreshed = 0
+        var failed = 0
+        try {
+            remoteProviders.forEach { provider ->
+                try {
+                    refreshRuleProviderNow(profile, provider)
+                    refreshed++
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    failed++
+                }
+            }
+        } finally {
+            refreshingAllRuleProviders = false
+        }
+        if (failed == 0) "已刷新 $refreshed 个远程规则集" else "刷新完成：成功 $refreshed 个，失败 $failed 个"
+    }
+    private suspend fun refreshRuleProviderNow(profile: ConfigProfile, provider: RuleProvider): Int? {
         refreshingRuleProviderIds = refreshingRuleProviderIds + provider.id
         try {
             val refreshed = withContext(Dispatchers.IO) {
                 RuleProviderRefresher().refresh(provider, File(getApplication<Application>().filesDir, "rule-providers/${profile.id}"))
             }
             repository.updateRuleProviderStatus(RuleProviderStatus(profile.id, provider.id, System.currentTimeMillis(), null, refreshed.itemCount, refreshed.cacheFileName))
-            "规则集已刷新${refreshed.itemCount?.let { "，$it 项" }.orEmpty()}"
+            return refreshed.itemCount
         } catch (error: Throwable) {
             val previous = state.value.ruleProviderStatuses.firstOrNull { it.profileId == profile.id && it.providerId == provider.id }
             repository.updateRuleProviderStatus(RuleProviderStatus(profile.id, provider.id, previous?.refreshedAt, error.message ?: "刷新失败", previous?.itemCount, previous?.cacheFileName))
