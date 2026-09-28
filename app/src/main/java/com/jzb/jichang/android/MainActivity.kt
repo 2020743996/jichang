@@ -158,6 +158,7 @@ import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.service.MihomoConfigGenerator
+import com.jzb.jichang.android.service.GeneratedConfig
 import com.jzb.jichang.android.service.MihomoTemplateParser
 import com.jzb.jichang.android.service.TemplateSubscriptionParameter
 import com.jzb.jichang.android.service.ConfigExportOptions
@@ -190,6 +191,7 @@ private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("�
 private enum class RuleSection(val label: String) { List("规则"), Groups("策略组"), Providers("规则集"), SubRules("子规则"), Diagnostics("校验"), General("基础配置"), Advanced("高级 YAML") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
+private val emptyGeneratedConfig = GeneratedConfig("", 0, 0)
 
 @Composable
 private fun JichangAlertDialog(
@@ -343,8 +345,30 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             enabledNodeIds = profile.enabledNodeIds,
         )
     }
-    val generated = remember(state, profile, exportOptions) { generator.generate(state, profile, exportOptions) }
+    val generationState = remember(state.sources, state.nodes, state.templates, profile) {
+        AppState(sources = state.sources, nodes = state.nodes, profiles = listOf(profile), activeProfileId = profile.id, templates = state.templates)
+    }
+    val generatedResult by key(generationState, exportOptions) {
+        produceState<Result<GeneratedConfig>?>(initialValue = null) {
+            value = withContext(Dispatchers.Default) {
+                runCatching { generator.generate(generationState, profile, exportOptions, parsedTemplate) }
+            }
+        }
+    }
+    val configReady = generatedResult?.isSuccess == true
+    val generationError = generatedResult?.exceptionOrNull()?.message
+    val generated = generatedResult?.getOrNull() ?: emptyGeneratedConfig
     val configText = generated.yaml
+    val validationIssues = remember(state.ruleProfile, state.nodes) {
+        RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet())
+    }
+    val refreshIssues = remember(state.ruleProviderStatuses, state.ruleProfile.providers, profile.id) {
+        state.ruleProviderStatuses.filter { it.profileId == profile.id && !it.error.isNullOrBlank() }
+            .mapNotNull { status -> state.ruleProfile.providers.firstOrNull { it.id == status.providerId }?.let { provider ->
+                com.jzb.jichang.android.service.RuleIssue(-1, RoutingRule("RULE-SET", provider.name, ""), "规则集刷新失败：${status.error}", providerId = provider.id)
+            } }
+    }
+    val ruleIssues = remember(validationIssues, refreshIssues) { validationIssues + refreshIssues }
     val filename = remember(profile.fileName) { safeYamlFileName(profile.fileName) }
     val effectiveVisualSettings = remember(profile, parsedTemplate) {
         MihomoSettings.effectiveVisualSettings(parsedTemplate?.rawRoot.orEmpty(), profile)
@@ -409,7 +433,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     }
 
     DisposableEffect(shareController) { onDispose { shareController.unbind() } }
-    LaunchedEffect(configText, filename) { shareController.updateConfig(configText, filename) }
+    LaunchedEffect(configText, filename, configReady) { if (configReady) shareController.updateConfig(configText, filename) }
 
     fun downloadConfig() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -421,7 +445,9 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     }
 
     fun requestExport(action: ExportAction) {
-        if (generated.unresolvedTemplateProviders.isNotEmpty()) {
+        if (!configReady) {
+            viewModel.run { throw IllegalStateException(generationError ?: "配置生成中，请稍候") }
+        } else if (generated.unresolvedTemplateProviders.isNotEmpty()) {
             viewModel.run { throw IllegalStateException("请先为模板订阅绑定机场：${generated.unresolvedTemplateProviders.joinToString("、")}") }
         } else if (sensitiveReasons.isNotEmpty()) pendingSensitiveAction = action
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
@@ -532,6 +558,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 ) { currentPage -> when (currentPage) {
                     AppPage.Home -> HomePage(
                         state = state,
+                        issues = ruleIssues,
                         onNavigate = { page = it },
                         onOpenTemplates = { page = AppPage.Resources; resourceTab = ResourceTab.Templates },
                         onOpenIssues = { page = AppPage.Rules; ruleSection = RuleSection.Diagnostics },
@@ -569,7 +596,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         }
                     }
                     AppPage.Rules -> key(profile.id) { RulesPage(
-                        state, viewModel, section = ruleSection, onSectionChange = { ruleSection = it }, modifier = Modifier.fillMaxSize(),
+                        state, viewModel, issues = ruleIssues, section = ruleSection, onSectionChange = { ruleSection = it }, modifier = Modifier.fillMaxSize(),
                         templateRoot = parsedTemplate?.rawRoot.orEmpty(),
                         onEditGroup = { editingGroup = it; dialog = DialogKind.Group },
                         onEditRule = { index, rule -> editingRule = index to rule; dialog = DialogKind.Rule },
@@ -580,14 +607,18 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         onSaveMihomoSettings = viewModel::saveMihomoSettings,
                         onSaveAdvancedYaml = viewModel::saveAdvancedYaml,
                     ) }
-                    AppPage.Share -> if (showYamlPreview) YamlPreviewPage(configText, Modifier.fillMaxSize()) else ExportPage(
+                    AppPage.Share -> if (showYamlPreview) {
+                        if (configReady) YamlPreviewPage(configText, Modifier.fillMaxSize())
+                        else Text(generationError ?: "正在生成配置…", Modifier.fillMaxSize().padding(JichangSpacing.pageHorizontal))
+                    } else ExportPage(
                                 state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
                                 skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
+                                configReady = configReady, generationError = generationError,
                                 shareUrl = shareUrl, shareError = shareError, filename = filename,
                                 unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
                                 templateBindings = profile.templateProviderBindings,
-                                ruleIssues = currentRuleIssues(state),
+                                ruleIssues = ruleIssues,
                                 hasRegionalProxyGroups = parsedTemplate?.hasRegionalProxyGroups == true,
                                 onTemplateBinding = viewModel::bindTemplateProvider,
                                 onModeChange = { viewModel.updateExportSettings(it.name, profile.enabledRegions, profile.regionOverrides) },
@@ -665,7 +696,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             onDismissRequest = { pendingSensitiveAction = null },
             title = { Text("配置包含敏感信息") },
             text = { Text("导出内容包含${sensitiveReasons.joinToString("、")}。拿到配置文件或局域网分享链接的人可能访问这些服务，请只分享给可信对象。") },
-            confirmButton = { TextButton(onClick = {
+            confirmButton = { TextButton(enabled = configReady, onClick = {
                 pendingSensitiveAction = null
                 if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
             }) { Text("继续") } },
@@ -710,13 +741,13 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
 @Composable
 private fun HomePage(
     state: AppState,
+    issues: List<com.jzb.jichang.android.service.RuleIssue>,
     onNavigate: (AppPage) -> Unit,
     onOpenTemplates: () -> Unit,
     onOpenIssues: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profile = state.activeProfile
-    val issues = currentRuleIssues(state)
     val blocking = issues.count { !it.warning }
     val selectedNodes = state.nodes.count { it.id in profile.enabledNodeIds && (it.sourceId == null || it.sourceId in profile.selectedSourceIds) }
     LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
@@ -749,6 +780,7 @@ private fun HomePage(
 @Composable
 private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
+    val nodeCounts = remember(state.nodes) { state.nodes.groupingBy { it.sourceId }.eachCount() }
     var sourceToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.SubscriptionSource?>(null) }
     LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
@@ -784,7 +816,7 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                             }
                         }
                     }
-                    val count = state.nodes.count { it.sourceId == source.id }
+                    val count = nodeCounts[source.id] ?: 0
                     Text(
                         if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 已更新" } ?: " · 尚未刷新"}",
                         style = MaterialTheme.typography.bodySmall,
@@ -826,15 +858,17 @@ private fun NodesPage(
     val profile = state.activeProfile
     val regionKeys = NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER
     val regions = listOf("全部地区") + regionKeys.map(NodeAutoGroups::title)
-    val protocols = listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted()
+    val protocols = remember(state.nodes) { listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted() }
+    val sourceNames = remember(state.sources) { state.sources.associate { it.id to it.name } }
     val filtersActive = protocolFilter != "全部协议" || sourceFilter != "全部来源" || enabledFilter != "全部" || regionFilter != "全部地区"
-    val filtered = state.nodes.filter { node ->
-        val selectedRegion = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
-        (query.isBlank() || node.name.contains(query, true) || node.server.contains(query, true)) &&
-            (protocolFilter == "全部协议" || node.type.equals(protocolFilter, true)) &&
-            (sourceFilter == "全部来源" || (sourceFilter == "手动导入" && node.sourceId == null) || state.sources.firstOrNull { it.id == node.sourceId }?.name == sourceFilter) &&
-            (enabledFilter == "全部" || (node.id in profile.enabledNodeIds) == (enabledFilter == "已启用")) &&
-            (regionFilter == "全部地区" || NodeAutoGroups.title(selectedRegion) == regionFilter)
+    val filtered = remember(state.nodes, profile, sourceNames, query, protocolFilter, sourceFilter, enabledFilter, regionFilter) {
+        state.nodes.filter { node ->
+            (query.isBlank() || node.name.contains(query, true) || node.server.contains(query, true)) &&
+                (protocolFilter == "全部协议" || node.type.equals(protocolFilter, true)) &&
+                (sourceFilter == "全部来源" || (sourceFilter == "手动导入" && node.sourceId == null) || node.sourceId?.let(sourceNames::get) == sourceFilter) &&
+                (enabledFilter == "全部" || (node.id in profile.enabledNodeIds) == (enabledFilter == "已启用")) &&
+                (regionFilter == "全部地区" || NodeAutoGroups.title(profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)) == regionFilter)
+        }
     }
     LazyColumn(
         modifier = modifier.fillMaxSize().padding(horizontal = JichangSpacing.pageHorizontal),
@@ -997,13 +1031,6 @@ private fun RuleManagementEntry(title: String, detail: String, modifier: Modifie
         }
     }
 }
-
-private fun currentRuleIssues(state: AppState): List<com.jzb.jichang.android.service.RuleIssue> =
-    RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet()) + state.ruleProviderStatuses
-        .filter { it.profileId == state.activeProfile.id && !it.error.isNullOrBlank() }
-        .mapNotNull { status -> state.ruleProfile.providers.firstOrNull { it.id == status.providerId }?.let { provider ->
-            com.jzb.jichang.android.service.RuleIssue(-1, RoutingRule("RULE-SET", provider.name, ""), "规则集刷新失败：${status.error}", providerId = provider.id)
-        } }
 
 @Composable
 private fun MihomoSettingsPage(
@@ -1220,6 +1247,7 @@ private fun SettingsTextField(
 private fun RulesPage(
     state: AppState,
     viewModel: AppViewModel,
+    issues: List<com.jzb.jichang.android.service.RuleIssue>,
     section: RuleSection,
     onSectionChange: (RuleSection) -> Unit,
     modifier: Modifier = Modifier,
@@ -1252,32 +1280,35 @@ private fun RulesPage(
     LaunchedEffect(section) {
         if (section != RuleSection.List) { selecting = false; selectedRules = emptySet() }
     }
-    val issues = remember(state.ruleProfile, state.ruleProviderStatuses, state.nodes, state.activeProfile.id) { currentRuleIssues(state) }
     val blockingIssues = issues.count { !it.warning }
     val targetNames = (state.ruleProfile.groups.map { it.name } + listOf("DIRECT", "REJECT")).distinct()
     val categories = listOf("全部类型", "域名", "IP 与地理", "端口与网络", "进程", "规则集", "逻辑与兜底")
     val filtered = query.isNotBlank() || category != "全部类型" || strategy != "全部策略"
     val lastMovableIndex = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type == "MATCH" }) 1 else 0
-    val visibleRules = state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
-        val conditionText = buildString {
-            fun appendCondition(condition: RuleCondition) {
-                append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty())
-                condition.children.forEach(::appendCondition)
+    val visibleRules = remember(section, state.ruleProfile.rules, query, category, strategy) {
+        if (section != RuleSection.List) emptyList() else state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
+            val matchesText = query.isBlank() || run {
+                val conditionText = buildString {
+                    fun appendCondition(condition: RuleCondition) {
+                        append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty())
+                        condition.children.forEach(::appendCondition)
+                    }
+                    rule.conditions.forEach(::appendCondition)
+                }
+                listOf(rule.type, rule.value, rule.group, rule.rawLine.orEmpty(), rule.extraParameters.joinToString(" "), conditionText).any { it.contains(query, true) }
             }
-            rule.conditions.forEach(::appendCondition)
+            val matchesStrategy = strategy == "全部策略" || rule.group == strategy
+            val matchesCategory = when (category) {
+                "域名" -> rule.type.startsWith("DOMAIN") || rule.type == "GEOSITE"
+                "IP 与地理" -> rule.type.contains("IP") || rule.type.contains("GEO")
+                "端口与网络" -> rule.type.contains("PORT") || rule.type in setOf("NETWORK", "IN-TYPE", "DSCP")
+                "进程" -> rule.type.startsWith("PROCESS") || rule.type == "UID"
+                "规则集" -> rule.type in setOf("RULE-SET", "SUB-RULE")
+                "逻辑与兜底" -> rule.type in setOf("AND", "OR", "NOT", "MATCH")
+                else -> true
+            }
+            matchesText && matchesStrategy && matchesCategory
         }
-        val matchesText = query.isBlank() || listOf(rule.type, rule.value, rule.group, rule.rawLine.orEmpty(), rule.extraParameters.joinToString(" "), conditionText).any { it.contains(query, true) }
-        val matchesStrategy = strategy == "全部策略" || rule.group == strategy
-        val matchesCategory = when (category) {
-            "域名" -> rule.type.startsWith("DOMAIN") || rule.type == "GEOSITE"
-            "IP 与地理" -> rule.type.contains("IP") || rule.type.contains("GEO")
-            "端口与网络" -> rule.type.contains("PORT") || rule.type in setOf("NETWORK", "IN-TYPE", "DSCP")
-            "进程" -> rule.type.startsWith("PROCESS") || rule.type == "UID"
-            "规则集" -> rule.type in setOf("RULE-SET", "SUB-RULE")
-            "逻辑与兜底" -> rule.type in setOf("AND", "OR", "NOT", "MATCH")
-            else -> true
-        }
-        matchesText && matchesStrategy && matchesCategory
     }
     when (section) {
         RuleSection.List -> LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.item)) {
@@ -1724,6 +1755,8 @@ private fun ruleSummary(rule: RoutingRule): String = when (rule.type) {
 private fun ExportPage(
     state: AppState,
     options: ConfigExportOptions,
+    configReady: Boolean,
+    generationError: String?,
     generatedNodes: Int,
     skippedNodes: Int,
     referencedSubscriptions: Int,
@@ -1749,7 +1782,10 @@ private fun ExportPage(
     val profile = state.activeProfile
     val blockingRuleIssues = ruleIssues.filterNot { it.warning }
     Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
-        if (ruleIssues.isEmpty() && unresolvedTemplateProviders.isEmpty()) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        if (!configReady) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Text(generationError ?: "正在生成配置…", Modifier.padding(JichangSpacing.card), style = MaterialTheme.typography.bodySmall, color = if (generationError == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+        }
+        if (configReady && ruleIssues.isEmpty() && unresolvedTemplateProviders.isEmpty()) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Text("配置可导出", Modifier.padding(JichangSpacing.card), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
         }
         if (ruleIssues.isNotEmpty()) Card(onClick = onOpenIssues, modifier = Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = if (blockingRuleIssues.isEmpty()) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer)) {
@@ -1816,13 +1852,13 @@ private fun ExportPage(
             Icon(Icons.Outlined.Tune, null); Spacer(Modifier.width(8.dp)); Text("导出地区策略组")
         } else Text("模板已包含地区筛选策略组，直接沿用模板分组。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Button(onClick = onDownload, enabled = configReady && unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.CloudDownload, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text("下载配置", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
-            OutlinedButton(onClick = onShare, enabled = unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            OutlinedButton(onClick = onShare, enabled = configReady && unresolvedTemplateProviders.isEmpty() && blockingRuleIssues.isEmpty(), modifier = Modifier.weight(1f).height(JichangSpacing.touchTarget), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp))
                     Text(if (shareUrl == null) "开启分享" else "重新分享", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
@@ -1832,7 +1868,7 @@ private fun ExportPage(
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
-        OutlinedButton(onClick = onPreview, modifier = Modifier.fillMaxWidth()) { Text("预览生成的 YAML") }
+        OutlinedButton(onClick = onPreview, enabled = configReady, modifier = Modifier.fillMaxWidth()) { Text("预览生成的 YAML") }
         Spacer(Modifier.height(16.dp))
     }
 }

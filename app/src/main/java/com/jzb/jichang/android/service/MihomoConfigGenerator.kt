@@ -41,8 +41,8 @@ class MihomoConfigGenerator {
     fun generate(state: AppState, exportOptions: ConfigExportOptions = optionsFor(state.activeProfile)): GeneratedConfig =
         generate(state, state.activeProfile, exportOptions)
 
-    fun generate(state: AppState, profile: ConfigProfile, exportOptions: ConfigExportOptions = optionsFor(profile)): GeneratedConfig {
-        val parsedTemplate = profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id } }
+    fun generate(state: AppState, profile: ConfigProfile, exportOptions: ConfigExportOptions = optionsFor(profile), preparedTemplate: ParsedMihomoTemplate? = null): GeneratedConfig {
+        val parsedTemplate = preparedTemplate ?: profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id } }
             ?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() }
         val templateRoot = parsedTemplate?.rawRoot.orEmpty()
         val placeholderNames = parsedTemplate?.subscriptionParameters?.map { it.providerName }.orEmpty()
@@ -77,11 +77,13 @@ class MihomoConfigGenerator {
             supportedSelected.filter { it.sourceId == null || it.sourceId !in providerSourceIds }
         } else supportedSelected
         val names = uniqueNames(embeddedNodes)
+        val embeddedNameSet = names.toSet()
         val proxies = embeddedNodes.mapIndexed { index, node -> proxyMap(node, names[index]) }
         val proxyNamesById = embeddedNodes.mapIndexed { index, node -> node.id to names[index] }.toMap()
         val providerSnapshotNodes = state.nodes.filter { it.sourceId in providerSourceIds }
         val selectedNodeIds = exportOptions.enabledNodeIds ?: state.nodes.filter { it.enabled }.map { it.id }.toSet()
         val includedRemoteNodes = providerSnapshotNodes.filter { it.id in selectedNodeIds && it.id !in exportOptions.excludedNodeIds }
+        val includedRemoteNodesById = includedRemoteNodes.associateBy { it.id }
         val regions = includedRemoteNodes.associate { node -> node.id to regionFor(node, exportOptions) }
         val generated = generateRegionGroups(
             options = if (templateHasRegionalGroups) exportOptions.copy(enabledRegions = emptySet()) else exportOptions,
@@ -129,9 +131,10 @@ class MihomoConfigGenerator {
         }
         val groups = (configuredGroups + generated.groups).distinctBy { it.name }
         val groupNames = groups.map { it.name }.toSet()
+        val generatedGroupNames = generated.groups.map { it.name }.toSet()
         val allNodeNames = state.nodes.associate { it.id to it.name.safeName() }
         val groupYaml = groups.map { group ->
-            val isGenerated = generated.groups.any { it.name == group.name }
+            val isGenerated = group.name in generatedGroupNames
             val isDefaultMaster = !isGenerated && group.name == "PROXY" && group.members.isEmpty() && !group.membersExplicit && generated.groups.isNotEmpty()
             val configuredMembers = when {
                 isGenerated -> group.members
@@ -143,13 +146,10 @@ class MihomoConfigGenerator {
                     proxyNamesById[id] ?: member.takeUnless { member.startsWith("node:") }
                 }
             }
-            val eligibleNodeNames = configuredMembers.filter { it in names }
-                .filter { nodeName ->
-                    val filter = group.extra["filter"]?.toString()
-                    val excludeFilter = group.extra["exclude-filter"]?.toString()
-                    (filter == null || matchesGroupFilter(nodeName, filter, group.name)) &&
-                        (excludeFilter == null || !matchesGroupFilter(nodeName, excludeFilter, group.name))
-                }
+            val includeMatcher = group.extra["filter"]?.toString()?.let { groupFilterMatcher(it, group.name) }
+            val excludeMatcher = group.extra["exclude-filter"]?.toString()?.let { groupFilterMatcher(it, group.name) }
+            val eligibleNodeNames = configuredMembers.filter { it in embeddedNameSet }
+                .filter { nodeName -> includeMatcher?.invoke(nodeName) != false && excludeMatcher?.invoke(nodeName) != true }
             val candidates = (eligibleNodeNames + configuredMembers.filter { it in groupNames || it == "DIRECT" || it == "REJECT" }).distinct()
             linkedMapOf<String, Any?>(
                 "name" to group.name.safeName(),
@@ -179,7 +179,7 @@ class MihomoConfigGenerator {
                         }
                     } else if (!isDefaultMaster && group.extra["use"] == null && group.name !in groupsUsingTemplateProviders) {
                         val remoteMembers = if (group.members.isEmpty() && !group.membersExplicit) includedRemoteNodes else group.members.mapNotNull { member ->
-                            if (member.startsWith("node:")) includedRemoteNodes.firstOrNull { it.id == member.removePrefix("node:") } else null
+                            if (member.startsWith("node:")) includedRemoteNodesById[member.removePrefix("node:")] else null
                         }
                         if (remoteMembers.isNotEmpty() || (group.members.isEmpty() && !group.membersExplicit)) {
                             put("use", providerNames)
@@ -365,11 +365,11 @@ class MihomoConfigGenerator {
     private fun regionFor(node: ProxyNode, options: ConfigExportOptions): String =
         options.regionOverrides[node.id]?.takeIf { it in NodeAutoGroups.allKeys } ?: NodeAutoGroups.classify(node.name)
 
-    private fun matchesGroupFilter(nodeName: String, expression: String, groupName: String): Boolean {
-        val regexMatch = runCatching { Regex(expression).containsMatchIn(nodeName) }.getOrNull()
-        if (regexMatch != null) return regexMatch
-        val expectedRegion = NodeAutoGroups.regionForGroupName(groupName) ?: return false
-        return NodeAutoGroups.classify(nodeName) == expectedRegion
+    private fun groupFilterMatcher(expression: String, groupName: String): (String) -> Boolean {
+        val regex = runCatching { Regex(expression) }.getOrNull()
+        if (regex != null) return { regex.containsMatchIn(it) }
+        val expectedRegion = NodeAutoGroups.regionForGroupName(groupName) ?: return { false }
+        return { NodeAutoGroups.classify(it) == expectedRegion }
     }
 
     private fun combinePatterns(patterns: List<String>): String? = patterns.filter(String::isNotBlank).distinct().takeIf { it.isNotEmpty() }?.joinToString("|", "(", ")")

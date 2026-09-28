@@ -17,8 +17,20 @@ data class RuleIssue(
 )
 
 object RuleDiagnostics {
+    private data class MatcherKey(
+        val type: String,
+        val value: String,
+        val conditions: List<RuleCondition>,
+        val noResolve: Boolean,
+        val source: Boolean,
+        val extraParameters: List<String>,
+        val rawLine: String?,
+    )
+
     fun inspect(profile: RuleProfile, availableNodeIds: Set<String>? = null): List<RuleIssue> = buildList {
-        val groupNames = profile.groups.map { it.name }.toSet() + setOf("DIRECT", "REJECT")
+        val groupsByName = LinkedHashMap<String, PolicyGroup>()
+        profile.groups.forEach { groupsByName.putIfAbsent(it.name, it) }
+        val groupNames = groupsByName.keys + setOf("DIRECT", "REJECT")
         val providerNames = profile.providers.map { it.name }.toSet()
         val subRuleNames = profile.subRules.map { it.name }.toSet()
         if (profile.groups.map { it.name.lowercase() }.toSet().size != profile.groups.size) add(RuleIssue(-1, RoutingRule("", "", ""), "策略组名称重复"))
@@ -38,7 +50,7 @@ object RuleDiagnostics {
                 add(RuleIssue(-1, RoutingRule("", "", ""), "策略组“$name”存在循环成员引用", groupName = name))
                 return
             }
-            profile.groups.firstOrNull { it.name == name }?.members?.filter { it in profile.groups.map(PolicyGroup::name) }?.forEach(::visitGroup)
+            groupsByName[name]?.members?.filter { it in groupsByName }?.forEach(::visitGroup)
             visitingGroups -= name
             visitedGroups += name
         }
@@ -56,6 +68,7 @@ object RuleDiagnostics {
             if (provider.format !in setOf("yaml", "text", "mrs")) providerIssue("规则集“${provider.name}”的格式无效")
             if (provider.headers.any { (name, values) -> name.isBlank() || values.isEmpty() || values.any(String::isBlank) }) providerIssue("规则集“${provider.name}”包含空请求头")
         }
+        val earlierRulesByMatcher = mutableMapOf<MatcherKey, MutableList<Pair<Int, RoutingRule>>>()
         profile.rules.forEachIndexed { index, rule ->
             fun issue(message: String) { add(RuleIssue(index, rule, message)) }
             val type = rule.type.uppercase().trim()
@@ -76,15 +89,13 @@ object RuleDiagnostics {
             rule.extraParameters.forEach { parameter ->
                 if (parameter.isBlank() || parameter.contains(',') || parameter.contains('\n') || parameter.contains('\r')) issue("存在无效的高级参数")
             }
-            profile.rules.take(index).forEachIndexed { earlierIndex, earlier ->
-                val sameMatcher = rule.type.equals(earlier.type, true) &&
-                    rule.value == earlier.value && rule.conditions == earlier.conditions &&
-                    rule.noResolve == earlier.noResolve && rule.source == earlier.source &&
-                    rule.extraParameters == earlier.extraParameters && rule.rawLine == earlier.rawLine
-                if (sameMatcher && rule.group != earlier.group) {
+            val matcher = MatcherKey(rule.type.uppercase(), rule.value, rule.conditions, rule.noResolve, rule.source, rule.extraParameters, rule.rawLine)
+            earlierRulesByMatcher[matcher]?.forEach { (earlierIndex, earlier) ->
+                if (rule.group != earlier.group) {
                     add(RuleIssue(index, rule, "与第 ${earlierIndex + 1} 条规则的匹配条件相同，但目标策略组不同", relatedIndex = earlierIndex, warning = true))
                 }
             }
+            earlierRulesByMatcher.getOrPut(matcher) { mutableListOf() }.add(index to rule)
         }
         profile.subRules.forEach { subRule ->
             subRule.rules.forEachIndexed { index, rule ->

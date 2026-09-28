@@ -537,10 +537,12 @@ class JichangRepository(private val dao: SnapshotDao) {
         state.copy(profiles = state.profiles.map { if (it.id == state.activeProfileId) transform(it) else it })
     }
 
-    private suspend fun update(transform: (AppState) -> AppState): AppState = lock.withLock {
-        val next = transform(mutableState.value)
-        mutableState.value = next
-        dao.save(SnapshotEntity(payload = gson.toJson(next)))
-        next
+    private suspend fun update(transform: (AppState) -> AppState): AppState = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val next = transform(mutableState.value)
+            mutableState.value = next
+            dao.save(SnapshotEntity(payload = gson.toJson(next)))
+            next
+        }
     }
 }
