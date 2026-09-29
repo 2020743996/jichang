@@ -58,12 +58,13 @@ class LocalShareService : Service() {
         val tokenBytes = ByteArray(18).also(SecureRandom()::nextBytes)
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes)
         sharedConfig = config to filename
-        val active = ConfigServer(address, token) { sharedConfig ?: ("" to "鸡场.yaml") }
+        val extension = if (filename.endsWith(".json", true)) "json" else "yaml"
+        val active = ConfigServer(address, token, extension) { sharedConfig ?: ("" to "鸡场.$extension") }
         try {
             active.start(5_000, false)
             acquireShareLocks()
             server = active
-            currentUrl = "http://$address:${active.listeningPort}/$token/config.yaml"
+            currentUrl = "http://$address:${active.listeningPort}/$token/config.$extension"
             return currentUrl!!
         } catch (error: Throwable) {
             active.stop()
@@ -81,7 +82,10 @@ class LocalShareService : Service() {
         releaseShareLocks()
     }
 
-    fun updateConfig(config: String, filename: String) { if (currentUrl != null) sharedConfig = config to filename }
+    fun updateConfig(config: String, filename: String) {
+        val extension = if (filename.endsWith(".json", true)) "json" else "yaml"
+        if (currentUrl?.endsWith("/config.$extension") == true) sharedConfig = config to filename
+    }
 
     override fun onDestroy() {
         stopSharing()
@@ -126,6 +130,7 @@ class LocalShareService : Service() {
         networks.asSequence()
             .mapNotNull { network ->
                 val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
                 val transportPriority = when {
                     capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 0
                     capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
@@ -163,7 +168,7 @@ class LocalShareService : Service() {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-                .setContentTitle("正在分享 Mihomo 配置")
+                .setContentTitle("正在分享鸡场配置")
                 .setContentText("后台分享运行中 · 点此返回管理")
                 .setContentIntent(openPendingIntent)
                 .addAction(Notification.Action.Builder(Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止分享", stopPendingIntent).build())
@@ -172,7 +177,7 @@ class LocalShareService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-                .setContentTitle("正在分享 Mihomo 配置")
+                .setContentTitle("正在分享鸡场配置")
                 .setContentText("后台分享运行中 · 点此返回管理")
                 .setContentIntent(openPendingIntent)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止分享", stopPendingIntent)
@@ -180,9 +185,8 @@ class LocalShareService : Service() {
         }
     }
 
-    private class ConfigServer(host: String, private val token: String, private val config: () -> Pair<String, String>) : NanoHTTPD(host, 0) {
-        // NanoHTTPD otherwise enables gzip after serve() returns when the client advertises it.
-        // Keep this endpoint byte-for-byte YAML for clients that reject duplicate/invalid encodings.
+    private class ConfigServer(host: String, private val token: String, private val extension: String, private val config: () -> Pair<String, String>) : NanoHTTPD(host, 0) {
+        // Keep the response byte-for-byte for clients that reject invalid encodings.
         override fun useGzipWhenAccepted(response: Response): Boolean = false
 
         override fun serve(session: IHTTPSession): Response {
@@ -190,28 +194,29 @@ class LocalShareService : Service() {
                 return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "Method Not Allowed")
                     .apply { addHeader("Allow", "GET, HEAD") }
             }
-            val expected = "/$token/config.yaml"
+            val expected = "/$token/config.$extension"
             val actual = session.uri
             if (!MessageDigest.isEqual(expected.toByteArray(), actual.toByteArray())) {
                 return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
             }
-            val (yaml, filename) = config()
+            val (content, filename) = config()
+            val mime = if (extension == "json") "application/json; charset=utf-8" else "text/yaml; charset=utf-8"
             // NanoHTTPD 2.3.1 writes the body even for HEAD. Give it an empty stream while
             // retaining the length of the equivalent GET response in the metadata.
             val response = if (session.method == Method.HEAD) {
                 newFixedLengthResponse(
                     Response.Status.OK,
-                    "text/yaml; charset=utf-8",
+                    mime,
                     ByteArrayInputStream(ByteArray(0)),
-                    yaml.toByteArray(Charsets.UTF_8).size.toLong(),
+                    content.toByteArray(Charsets.UTF_8).size.toLong(),
                 )
-            } else newFixedLengthResponse(Response.Status.OK, "text/yaml; charset=utf-8", yaml)
+            } else newFixedLengthResponse(Response.Status.OK, mime, content)
             return response.apply {
                 addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
                 addHeader("X-Content-Type-Options", "nosniff")
                 // Keep the suggested profile filename without forcing import clients to
                 // treat this response as a file attachment. The first LAN share version
-                // returned YAML inline, which works with clients that import URLs directly.
+                // returned content inline, which works with clients that import URLs directly.
                 addHeader("Content-Disposition", "inline; filename*=UTF-8''${java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")}")
             }
         }
