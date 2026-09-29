@@ -158,9 +158,6 @@ import com.jzb.jichang.android.model.RuleProfile
 import com.jzb.jichang.android.model.SubRuleProfile
 import com.jzb.jichang.android.model.RoutingRule
 import com.jzb.jichang.android.service.MihomoConfigGenerator
-import com.jzb.jichang.android.service.SingBoxConfigGenerator
-import com.jzb.jichang.android.service.GeneratedSingBoxConfig
-import com.jzb.jichang.android.service.SingBoxExportIssue
 import com.jzb.jichang.android.service.GeneratedConfig
 import com.jzb.jichang.android.service.MihomoTemplateParser
 import com.jzb.jichang.android.service.TemplateSubscriptionParameter
@@ -178,7 +175,6 @@ import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -195,7 +191,6 @@ private enum class ResourceTab(val label: String) { Sources("订阅"), Nodes("�
 private enum class RuleSection(val label: String) { List("规则"), Groups("策略组"), Providers("规则集"), SubRules("子规则"), Diagnostics("校验"), General("基础配置"), Advanced("高级 YAML") }
 private enum class DialogKind { Source, Node, Group, Rule, Providers, Profile }
 private enum class ExportAction { Download, Share }
-private enum class ExportFormat(val label: String) { Mihomo("Mihomo"), SingBox("sing-box") }
 private val emptyGeneratedConfig = GeneratedConfig("", 0, 0)
 
 @Composable
@@ -290,7 +285,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var resourceTab by rememberSaveable { mutableStateOf(ResourceTab.Sources) }
     var ruleSection by rememberSaveable { mutableStateOf(RuleSection.List) }
     var showYamlPreview by rememberSaveable { mutableStateOf(false) }
-    var exportFormat by rememberSaveable { mutableStateOf(ExportFormat.Mihomo) }
     var dialog by remember { mutableStateOf<DialogKind?>(null) }
     var providerInitialType by remember { mutableStateOf<String?>(null) }
     var editingGroup by remember { mutableStateOf<PolicyGroup?>(null) }
@@ -326,7 +320,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val shareUrl by shareController.url.collectAsState()
     val shareError by shareController.error.collectAsState()
     val generator = remember { MihomoConfigGenerator() }
-    val singBoxGenerator = remember { SingBoxConfigGenerator() }
     val profile = state.activeProfile
     LaunchedEffect(profile.id) {
         ruleSection = RuleSection.List
@@ -362,18 +355,10 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             }
         }
     }
-    val singBoxResult by key(generationState, state.ruleProviderStatuses, exportFormat) {
-        produceState<Result<GeneratedSingBoxConfig>?>(initialValue = null) {
-            if (exportFormat == ExportFormat.SingBox) value = withContext(Dispatchers.IO) {
-                runCatching { singBoxGenerator.generate(generationState.copy(ruleProviderStatuses = state.ruleProviderStatuses), profile, File(context.filesDir, "rule-providers")) }
-            }
-        }
-    }
-    val singBoxGenerated = singBoxResult?.getOrNull()
-    val configReady = if (exportFormat == ExportFormat.Mihomo) generatedResult?.isSuccess == true else singBoxGenerated?.ready == true
-    val generationError = if (exportFormat == ExportFormat.Mihomo) generatedResult?.exceptionOrNull()?.message else singBoxResult?.exceptionOrNull()?.message
+    val configReady = generatedResult?.isSuccess == true
+    val generationError = generatedResult?.exceptionOrNull()?.message
     val generated = generatedResult?.getOrNull() ?: emptyGeneratedConfig
-    val configText = if (exportFormat == ExportFormat.Mihomo) generated.yaml else singBoxGenerated?.json.orEmpty()
+    val configText = generated.yaml
     val validationIssues = remember(state.ruleProfile, state.nodes) {
         RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet())
     }
@@ -384,20 +369,20 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             } }
     }
     val ruleIssues = remember(validationIssues, refreshIssues) { validationIssues + refreshIssues }
-    val filename = remember(profile.fileName, exportFormat) { safeConfigFileName(profile.fileName, exportFormat) }
+    val filename = remember(profile.fileName) { safeYamlFileName(profile.fileName) }
     val effectiveVisualSettings = remember(profile, parsedTemplate) {
         MihomoSettings.effectiveVisualSettings(parsedTemplate?.rawRoot.orEmpty(), profile)
     }
     val sensitiveReasons = buildList {
-        if (exportFormat == ExportFormat.Mihomo && generated.referencedSubscriptions > 0) add("机场订阅地址")
-        if (exportFormat == ExportFormat.Mihomo && !effectiveVisualSettings["external-controller"].toString().isNullOrBlank() && effectiveVisualSettings["external-controller"] != null) add("外部控制器地址")
-        if (exportFormat == ExportFormat.Mihomo && !effectiveVisualSettings["secret"].toString().isNullOrBlank() && effectiveVisualSettings["secret"] != null) add("控制器密钥")
+        if (generated.referencedSubscriptions > 0) add("机场订阅地址")
+        if (!effectiveVisualSettings["external-controller"].toString().isNullOrBlank() && effectiveVisualSettings["external-controller"] != null) add("外部控制器地址")
+        if (!effectiveVisualSettings["secret"].toString().isNullOrBlank() && effectiveVisualSettings["secret"] != null) add("控制器密钥")
         val authentication = effectiveVisualSettings["authentication"] as? List<*>
-        if (exportFormat == ExportFormat.Mihomo && !authentication.isNullOrEmpty()) add("监听账号密码")
+        if (!authentication.isNullOrEmpty()) add("监听账号密码")
     }
     var templateExportContent by remember { mutableStateOf<String?>(null) }
 
-    val saveLegacyConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
+    val saveLegacyConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/yaml")) { uri: Uri? ->
         if (uri != null) {
             val content = configText
             viewModel.run {
@@ -448,14 +433,6 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     }
 
     DisposableEffect(shareController) { onDispose { shareController.unbind() } }
-    var sharingFormat by remember { mutableStateOf(exportFormat) }
-    LaunchedEffect(exportFormat) {
-        if (sharingFormat != exportFormat) {
-            shareController.stop()
-            pendingSensitiveAction = null
-            sharingFormat = exportFormat
-        }
-    }
     LaunchedEffect(configText, filename, configReady) { if (configReady) shareController.updateConfig(configText, filename) }
 
     fun downloadConfig() {
@@ -470,7 +447,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     fun requestExport(action: ExportAction) {
         if (!configReady) {
             viewModel.run { throw IllegalStateException(generationError ?: "配置生成中，请稍候") }
-        } else if (exportFormat == ExportFormat.Mihomo && generated.unresolvedTemplateProviders.isNotEmpty()) {
+        } else if (generated.unresolvedTemplateProviders.isNotEmpty()) {
             viewModel.run { throw IllegalStateException("请先为模板订阅绑定机场：${generated.unresolvedTemplateProviders.joinToString("、")}") }
         } else if (sensitiveReasons.isNotEmpty()) pendingSensitiveAction = action
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
@@ -634,23 +611,11 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         if (configReady) YamlPreviewPage(configText, Modifier.fillMaxSize())
                         else Text(generationError ?: "正在生成配置…", Modifier.fillMaxSize().padding(JichangSpacing.pageHorizontal))
                     } else ExportPage(
-                                state = state, options = exportOptions, format = exportFormat,
-                                onFormatChange = { exportFormat = it },
-                                singBoxIssues = singBoxGenerated?.issues.orEmpty(),
-                                onOpenSingBoxIssue = { issue -> when (issue.kind) {
-                                    "node" -> { page = AppPage.Resources; resourceTab = ResourceTab.Nodes }
-                                    "provider" -> { page = AppPage.Rules; ruleSection = RuleSection.Providers }
-                                    "group" -> { page = AppPage.Rules; ruleSection = RuleSection.Groups }
-                                    "rule" -> { page = AppPage.Rules; ruleSection = RuleSection.List }
-                                    "template" -> { page = AppPage.Resources; resourceTab = ResourceTab.Templates }
-                                    else -> { page = AppPage.Rules; ruleSection = RuleSection.General }
-                                } },
-                                generatedNodes = if (exportFormat == ExportFormat.Mihomo) generated.exportedNodes else singBoxGenerated?.exportedNodes ?: 0,
-                                skippedNodes = if (exportFormat == ExportFormat.Mihomo) generated.skippedNodes else 0,
-                                referencedSubscriptions = if (exportFormat == ExportFormat.Mihomo) generated.referencedSubscriptions else 0,
+                                state = state, options = exportOptions, generatedNodes = generated.exportedNodes,
+                                skippedNodes = generated.skippedNodes, referencedSubscriptions = generated.referencedSubscriptions,
                                 configReady = configReady, generationError = generationError,
                                 shareUrl = shareUrl, shareError = shareError, filename = filename,
-                                unresolvedTemplateProviders = if (exportFormat == ExportFormat.Mihomo) generated.unresolvedTemplateProviders else emptyList(),
+                                unresolvedTemplateProviders = generated.unresolvedTemplateProviders,
                                 templateParameters = parsedTemplate?.subscriptionParameters.orEmpty(),
                                 templateBindings = profile.templateProviderBindings,
                                 ruleIssues = ruleIssues,
@@ -1790,10 +1755,6 @@ private fun ruleSummary(rule: RoutingRule): String = when (rule.type) {
 private fun ExportPage(
     state: AppState,
     options: ConfigExportOptions,
-    format: ExportFormat,
-    onFormatChange: (ExportFormat) -> Unit,
-    singBoxIssues: List<SingBoxExportIssue>,
-    onOpenSingBoxIssue: (SingBoxExportIssue) -> Unit,
     configReady: Boolean,
     generationError: String?,
     generatedNodes: Int,
@@ -1821,22 +1782,8 @@ private fun ExportPage(
     val profile = state.activeProfile
     val blockingRuleIssues = ruleIssues.filterNot { it.warning }
     Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
-        SegmentedTabs(ExportFormat.entries.map { it.label }, format.ordinal) { onFormatChange(ExportFormat.entries[it]) }
-        if (!configReady && singBoxIssues.isEmpty()) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        if (!configReady) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Text(generationError ?: "正在生成配置…", Modifier.padding(JichangSpacing.card), style = MaterialTheme.typography.bodySmall, color = if (generationError == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
-        }
-        if (format == ExportFormat.SingBox && singBoxIssues.isNotEmpty()) {
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("sing-box 导出受阻 · ${singBoxIssues.size} 项", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
-                    singBoxIssues.forEach { issue ->
-                        TextButton(onClick = { onOpenSingBoxIssue(issue) }, modifier = Modifier.fillMaxWidth()) {
-                            Text("${issue.location}：${issue.message}", modifier = Modifier.weight(1f), textAlign = TextAlign.Start, color = MaterialTheme.colorScheme.onErrorContainer)
-                            Text("查看", color = MaterialTheme.colorScheme.onErrorContainer)
-                        }
-                    }
-                }
-            }
         }
         if (configReady && ruleIssues.isEmpty() && unresolvedTemplateProviders.isEmpty()) Card(Modifier.fillMaxWidth().padding(top = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Text("配置可导出", Modifier.padding(JichangSpacing.card), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
@@ -1861,7 +1808,6 @@ private fun ExportPage(
                 Text("文件名：$filename", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (format == ExportFormat.Mihomo) {
         Text("节点来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Row(
             modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
@@ -1897,10 +1843,6 @@ private fun ExportPage(
                 )
             }
         }
-        } else {
-            Text("面向发布时最新版 sing-box 稳定版与 Android SFA。订阅使用手机上已保存的节点快照；刷新订阅后需重新导出 JSON。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("规则集使用本地已刷新内容。若规则集尚未刷新，请到「规则 → 规则集」刷新后再导出。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
         Text(
             "在当前手机导入时，建议直接下载配置文件，再从 Downloads/鸡场 中选择；局域网链接主要用于其他设备。",
             style = MaterialTheme.typography.bodySmall,
@@ -1926,7 +1868,7 @@ private fun ExportPage(
         if (shareUrl == null) {
             if (shareError != null) Text(shareError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
-        OutlinedButton(onClick = onPreview, enabled = configReady, modifier = Modifier.fillMaxWidth()) { Text(if (format == ExportFormat.Mihomo) "预览生成的 YAML" else "预览生成的 JSON") }
+        OutlinedButton(onClick = onPreview, enabled = configReady, modifier = Modifier.fillMaxWidth()) { Text("预览生成的 YAML") }
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -2890,10 +2832,10 @@ private fun rulePlaceholder(type: String): String = when (type) {
     else -> "请输入规则值"
 }
 
-private fun safeConfigFileName(value: String, format: ExportFormat): String {
+private fun safeYamlFileName(value: String): String {
     val clean = value.trim().replace("[\\\\/:*?\"<>|\\p{Cntrl}]".toRegex(), "_").trim('.', ' ')
-        .removeSuffix(".yaml").removeSuffix(".yml").removeSuffix(".json").ifBlank { "鸡场" }
-    return "$clean.${if (format == ExportFormat.Mihomo) "yaml" else "json"}"
+        .removeSuffix(".yaml").removeSuffix(".yml").ifBlank { "鸡场" }
+    return "$clean.yaml"
 }
 
 private fun saveToDownloads(context: Context, content: String, filename: String) {
@@ -2911,7 +2853,7 @@ private fun saveToDownloads(context: Context, content: String, filename: String)
         collection,
         ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, filename)
-            put(MediaStore.Downloads.MIME_TYPE, if (filename.endsWith(".json", true)) "application/json" else "application/yaml")
+            put(MediaStore.Downloads.MIME_TYPE, "application/yaml")
             put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
             put(MediaStore.Downloads.IS_PENDING, 1)
         },
