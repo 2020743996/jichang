@@ -2,7 +2,7 @@
 
 在手机上整理节点、订阅和分流规则，生成可供 **Mihomo** 使用的 YAML 配置。
 
-**[下载 Android APK](https://github.com/2020743996/jichang/releases/latest)** · 支持 Android 13 及以上
+**[下载 Android APK](https://github.com/not-power/jichang/releases/latest)** · 支持 Android 13 及以上
 
 ## 主要功能
 
