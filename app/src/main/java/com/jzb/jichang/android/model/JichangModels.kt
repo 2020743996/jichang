@@ -110,6 +110,8 @@ data class ConfigTemplate(
     val rawYaml: String,
     val fileName: String,
     val createdAt: Long = System.currentTimeMillis(),
+    val remoteURL: String? = null,
+    val refreshedAt: Long? = null,
 )
 
 data class RuleProviderStatus(

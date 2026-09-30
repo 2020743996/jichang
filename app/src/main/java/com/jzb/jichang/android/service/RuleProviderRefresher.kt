@@ -60,42 +60,65 @@ class RuleProviderRefresher(
         return entries
     }
 
-    fun refresh(provider: RuleProvider, cacheDirectory: File): RefreshedRuleProvider {
-        val bytes = when (provider.type.lowercase()) {
-            "http" -> fetch(provider)
-            "inline" -> provider.payload.joinToString("\n").toByteArray(Charsets.UTF_8)
-            "file" -> readLocal(provider, cacheDirectory)
-            else -> error("未知规则集来源类型：${provider.type}")
+    suspend fun refresh(provider: RuleProvider, cacheDirectory: File): RefreshedRuleProvider {
+        var temporaryCache: File? = null
+        var createdCache: File? = null
+        try {
+            return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val bytes = when (provider.type.lowercase()) {
+                    "http" -> fetch(provider)
+                    "inline" -> provider.payload.joinToString("\n").toByteArray(Charsets.UTF_8)
+                    "file" -> readLocal(provider, cacheDirectory)
+                    else -> error("未知规则集来源类型：${provider.type}")
+                }
+                require(bytes.isNotEmpty()) { "规则集内容为空" }
+                require(bytes.size <= MAX_BYTES) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
+                val safeName = provider.id.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "provider" } + "-${java.util.UUID.randomUUID()}.cache"
+                if (provider.type.equals("http", true)) {
+                    cacheDirectory.mkdirs()
+                    val temporary = File(cacheDirectory, "$safeName.tmp").also { temporaryCache = it }
+                    val destination = File(cacheDirectory, safeName).also { createdCache = it }
+                    temporary.writeBytes(bytes)
+                    check(temporary.renameTo(destination) || temporary.copyTo(destination, overwrite = true).delete()) { "无法保存规则集缓存" }
+                }
+                RefreshedRuleProvider(bytes, safeName, countItems(bytes, provider.format))
+            }
+        } catch (error: Exception) {
+            // This also handles cancellation at the dispatcher return boundary.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                temporaryCache?.delete()
+                createdCache?.delete()
+            }
+            throw error
         }
-        require(bytes.isNotEmpty()) { "规则集内容为空" }
-        require(bytes.size <= MAX_BYTES) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
-        val safeName = provider.id.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "provider" } + ".cache"
-        if (provider.type.equals("http", true)) {
-            cacheDirectory.mkdirs()
-            File(cacheDirectory, "$safeName.tmp").writeBytes(bytes)
-            val temporary = File(cacheDirectory, "$safeName.tmp")
-            val destination = File(cacheDirectory, safeName)
-            check(temporary.renameTo(destination) || temporary.copyTo(destination, overwrite = true).delete()) { "无法保存规则集缓存" }
-        }
-        return RefreshedRuleProvider(bytes, safeName, countItems(bytes, provider.format))
     }
 
     fun readCached(cacheDirectory: File, cacheFileName: String): ByteArray? =
         runCatching { File(cacheDirectory, cacheFileName).takeIf { it.isFile && it.canonicalFile.parentFile == cacheDirectory.canonicalFile }?.readBytes() }.getOrNull()
 
-    private fun fetch(provider: RuleProvider): ByteArray {
+    private suspend fun fetch(provider: RuleProvider): ByteArray {
         val url = provider.url.trim().toHttpUrlOrNull() ?: error("规则集 URL 无效")
         require(url.scheme in setOf("http", "https")) { "规则集只支持 HTTP(S) URL" }
-        val request = Request.Builder().url(url).header("User-Agent", "JichangAndroid/0.7.4").apply {
+        val request = Request.Builder().url(url).header("User-Agent", "JichangAndroid/0.11.0").apply {
             provider.headers.forEach { (name, values) -> values.forEach { value -> addHeader(name, value) } }
         }.get().build()
-        client.newCall(request).execute().use { response ->
+        return client.newCall(request).readCancellable { response ->
             if (!response.isSuccessful) error("远程服务器返回 HTTP ${response.code}")
             val body = response.body ?: error("远程服务器没有返回规则集内容")
             require(body.contentLength() <= MAX_BYTES || body.contentLength() < 0) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
-            val bytes = body.bytes()
+            val output = java.io.ByteArrayOutputStream()
+            body.byteStream().use { input ->
+                val chunk = ByteArray(8192)
+                while (true) {
+                    val count = input.read(chunk)
+                    if (count < 0) break
+                    require(output.size() + count <= MAX_BYTES) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
+                    output.write(chunk, 0, count)
+                }
+            }
+            val bytes = output.toByteArray()
             require(bytes.size <= MAX_BYTES) { "规则集超过 ${MAX_BYTES / (1024 * 1024)} MB 限制" }
-            return bytes
+            bytes
         }
     }
 

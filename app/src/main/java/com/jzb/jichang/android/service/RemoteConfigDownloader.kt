@@ -31,7 +31,7 @@ class RemoteConfigDownloader(
         val parsedUrl = url.trim().toHttpUrlOrNull() ?: error("请输入有效的 HTTP(S) 配置链接")
         require(parsedUrl.scheme in setOf("http", "https")) { "仅支持 HTTP 或 HTTPS 链接" }
         require(parsedUrl.host.isNotBlank()) { "配置链接缺少主机名" }
-        val request = Request.Builder().url(parsedUrl).header("User-Agent", "JichangAndroid/0.5.0").get().build()
+        val request = Request.Builder().url(parsedUrl).header("User-Agent", "JichangAndroid/0.11.0").get().build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("远程服务器返回 HTTP ${response.code}")
             val body = response.body ?: error("远程服务器没有返回文件内容")

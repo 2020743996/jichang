@@ -6,6 +6,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -17,6 +20,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.unit.dp
 
+val LocalGlassEnabled = compositionLocalOf { true }
 val LocalGlassTransparency = compositionLocalOf { 0.45f }
 
 /** GPU backdrop refraction, restricted to the measured top and bottom chrome regions. */
@@ -31,6 +35,10 @@ class LiquidGlassScene {
         uniform float opacity;
 
         float roundedRectDistance(float2 p, float4 rect, float radius) {
+            if (radius < 0.001) {
+                float2 edges = max(rect.xy - p, p - rect.zw);
+                if (min(edges.x, edges.y) <= 0.0) return max(edges.x, edges.y);
+            }
             float2 center = (rect.xy + rect.zw) * 0.5;
             float2 halfSize = (rect.zw - rect.xy) * 0.5;
             float2 q = abs(p - center) - halfSize + radius;
@@ -52,6 +60,10 @@ class LiquidGlassScene {
         }
 
         half4 main(float2 p) {
+            // Most pixels belong to page content. Skip all refraction geometry there.
+            bool inTopBounds = p.x >= topRect.x - 1.0 && p.x <= topRect.z + 1.0 && p.y >= topRect.y - 1.0 && p.y <= topRect.w + 1.0;
+            bool inBottomBounds = p.x >= bottomRect.x - 1.0 && p.x <= bottomRect.z + 1.0 && p.y >= bottomRect.y - 1.0 && p.y <= bottomRect.w + 1.0;
+            if (!inTopBounds && !inBottomBounds) return backdrop.eval(p);
             half4 original = backdrop.eval(p);
             float topD = roundedRectDistance(p, topRect, topRadius);
             float bottomD = roundedRectDistance(p, bottomRect, bottomRadius);
@@ -100,6 +112,7 @@ class LiquidGlassScene {
 
 @Composable
 fun Modifier.glassMaterial(shape: Shape, opacity: Float = LocalGlassTransparency.current): Modifier {
+    if (!LocalGlassEnabled.current) return clip(shape).background(MaterialTheme.colorScheme.surface)
     val edge = Color(0xA6FFFFFF)
     val shadow = Color(0x18293648)
     val isSystemBarSurface = shape === androidx.compose.ui.graphics.RectangleShape

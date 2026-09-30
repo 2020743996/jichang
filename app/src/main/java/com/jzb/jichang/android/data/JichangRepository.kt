@@ -20,6 +20,14 @@ import com.jzb.jichang.android.service.MihomoConfigGenerator
 import com.jzb.jichang.android.service.SubscriptionParser
 import com.jzb.jichang.android.service.MihomoTemplateParser
 import com.jzb.jichang.android.service.MihomoSettings
+import com.jzb.jichang.android.service.PortableBackup
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import com.jzb.jichang.android.service.readCancellable
+import com.jzb.jichang.android.service.StaleRefreshException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,7 +47,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class JichangRepository(private val dao: SnapshotDao) {
+class JichangRepository(private val dao: SnapshotDao, private val http: OkHttpClient = defaultHttpClient()) {
     private val gson: Gson = GsonBuilder().serializeNulls().create()
     private val lock = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -47,29 +55,88 @@ class JichangRepository(private val dao: SnapshotDao) {
     val state: StateFlow<AppState> = mutableState
     private val parser = SubscriptionParser()
     private val templateParser = MihomoTemplateParser()
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private var snapshotNeedsNormalization = false
+    private var loaded = CompletableDeferred<Unit>()
+    private val mutableReady = MutableStateFlow(false)
+    val ready: StateFlow<Boolean> = mutableReady
+    private val mutableLoadError = MutableStateFlow<String?>(null)
+    val loadError: StateFlow<String?> = mutableLoadError
 
-    init {
+    init { load() }
+
+    private fun load() {
         scope.launch {
-            val payload = dao.observe().first()
-            if (payload.isNullOrBlank()) {
-                dao.save(SnapshotEntity(payload = gson.toJson(AppState())))
-            } else {
-                runCatching { decodeState(payload) }.getOrNull()?.let { migrated ->
-                    mutableState.value = migrated
-                    if (!runCatching { JsonParser.parseString(payload).asJsonObject.has("profiles") }.getOrDefault(false)) {
-                        dao.save(SnapshotEntity(payload = gson.toJson(migrated)))
+            try {
+                lock.withLock {
+                    val payload = dao.observe().first()
+                    val restored = if (payload.isNullOrBlank()) AppState() else decodeState(payload)
+                    if (payload.isNullOrBlank() || !JsonParser.parseString(payload).asJsonObject.has("profiles")) {
+                        dao.save(SnapshotEntity(payload = gson.toJson(restored)))
                     }
+                    snapshotNeedsNormalization = !payload.isNullOrBlank() && gson.toJson(restored) != payload
+                    mutableState.value = restored
+                    mutableReady.value = true
+                    mutableLoadError.value = null
+                    loaded.complete(Unit)
                 }
+            } catch (error: CancellationException) {
+                loaded.cancel(error)
+                throw error
+            } catch (error: Exception) {
+                mutableLoadError.value = error.message ?: "无法读取本机数据"
+                loaded.completeExceptionally(error)
             }
         }
     }
 
+    fun retryLoad() {
+        if (loaded.isCompleted && !mutableReady.value) {
+            loaded = CompletableDeferred()
+            mutableLoadError.value = null
+            load()
+        }
+    }
+
+    suspend fun awaitReady() = loaded.await()
+
+    private suspend fun targetId(): String {
+        awaitReady()
+        return currentCoroutineContext()[ProfileTarget]?.id ?: mutableState.value.activeProfileId
+    }
+
+    companion object {
+        private fun defaultHttpClient() = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).followRedirects(true).build()
+    }
+
     fun close() { scope.cancel() }
+
+    suspend fun exportBackup(cacheRoot: java.io.File): ByteArray = withContext(Dispatchers.IO) {
+        awaitReady()
+        lock.withLock {
+            PortableBackup.create(gson.toJson(mutableState.value), cacheRoot)
+        }
+    }
+
+    suspend fun importBackup(bytes: ByteArray, cacheRoot: java.io.File) = withContext(Dispatchers.IO) {
+        awaitReady()
+        lock.withLock {
+            val contents = PortableBackup.read(bytes)
+            val restored = decodeState(contents.stateJson)
+            require(restored.profiles.isNotEmpty()) { "备份至少需要包含一个配置" }
+            require(restored.profiles.any { it.id == restored.activeProfileId }) { "备份的当前配置无效" }
+            val replacement = PortableBackup.stageCacheFiles(cacheRoot, contents.cacheFiles)
+            try {
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) {
+                    replacement.install()
+                    dao.save(SnapshotEntity(payload = gson.toJson(restored)))
+                    mutableState.value = restored
+                    replacement.commit()
+                }
+            } finally { replacement.close() }
+        }
+    }
 
     private fun decodeState(payload: String): AppState {
         val json = JsonParser.parseString(payload).asJsonObject
@@ -101,30 +168,33 @@ class JichangRepository(private val dao: SnapshotDao) {
         return AppState(sources, nodes, listOf(migrated), migrated.id, templates)
     }
 
-    suspend fun createProfile(name: String, fileName: String, copyActive: Boolean): String = update { state ->
-        val cleanName = name.trim()
-        require(cleanName.isNotBlank()) { "请输入配置名称" }
-        require(state.profiles.none { it.name.equals(cleanName, true) }) { "配置名称已存在" }
-        val active = state.activeProfile
-        val profile = if (copyActive) active.copy(
-            id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
-            selectedSourceIds = active.selectedSourceIds.toSet(), enabledNodeIds = active.enabledNodeIds.toSet(),
-            regionOverrides = active.regionOverrides.toMap(), ruleProfile = active.ruleProfile.copy(
-                groups = active.ruleProfile.groups.toList(), rules = active.ruleProfile.rules.toList(),
-                providers = active.ruleProfile.providers.toList(), subRules = active.ruleProfile.subRules.toList(),
-            ), templateProviderBindings = active.templateProviderBindings.toMap(),
-        ) else ConfigProfile(
-            id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
-        )
-        state.copy(profiles = state.profiles + profile, activeProfileId = profile.id)
-    }.activeProfileId
+    suspend fun createProfile(name: String, fileName: String, copyActive: Boolean): String {
+        val target = targetId()
+        return update { state ->
+            val cleanName = name.trim()
+            require(cleanName.isNotBlank()) { "请输入配置名称" }
+            require(state.profiles.none { it.name.equals(cleanName, true) }) { "配置名称已存在" }
+            val active = state.profiles.firstOrNull { it.id == target } ?: error("配置已不存在")
+            val profile = if (copyActive) active.copy(
+                id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
+                selectedSourceIds = active.selectedSourceIds.toSet(), enabledNodeIds = active.enabledNodeIds.toSet(),
+                regionOverrides = active.regionOverrides.toMap(), ruleProfile = active.ruleProfile.copy(
+                    groups = active.ruleProfile.groups.toList(), rules = active.ruleProfile.rules.toList(),
+                    providers = active.ruleProfile.providers.toList(), subRules = active.ruleProfile.subRules.toList(),
+                ), templateProviderBindings = active.templateProviderBindings.toMap(),
+            ) else ConfigProfile(
+                id = UUID.randomUUID().toString(), name = cleanName, fileName = fileName.trim().ifBlank { cleanName },
+            )
+            state.copy(profiles = state.profiles + profile, activeProfileId = profile.id)
+        }.activeProfileId
+    }
 
-    suspend fun saveTemplate(name: String, rawYaml: String, fileName: String): String = update { state ->
+    suspend fun saveTemplate(name: String, rawYaml: String, fileName: String, remoteURL: String? = null, refreshedAt: Long? = null): String = update { state ->
         templateParser.parse(rawYaml)
         val cleanName = name.trim().ifBlank { fileName.substringBeforeLast('.') }
         require(cleanName.isNotBlank()) { "请输入模板名称" }
         require(state.templates.none { it.name.equals(cleanName, true) }) { "模板名称已存在" }
-        val template = ConfigTemplate(UUID.randomUUID().toString(), cleanName, rawYaml, fileName)
+        val template = ConfigTemplate(UUID.randomUUID().toString(), cleanName, rawYaml, fileName, remoteURL = remoteURL, refreshedAt = refreshedAt)
         state.copy(templates = state.templates + template)
     }.templates.last().id
 
@@ -192,32 +262,50 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     suspend fun addSource(name: String, url: String): String {
+        val target = targetId()
         val parsed = URI(url.trim())
         require(parsed.scheme in setOf("http", "https") && !parsed.host.isNullOrBlank()) { "请输入有效的 HTTP 或 HTTPS 订阅地址" }
         val source = SubscriptionSource(UUID.randomUUID().toString(), name.trim().ifBlank { parsed.host }, url.trim())
         update { state -> state.copy(
             sources = state.sources + source,
-            profiles = state.profiles.map { profile -> if (profile.id == state.activeProfileId) profile.copy(selectedSourceIds = profile.selectedSourceIds + source.id) else profile },
+            profiles = state.profiles.map { profile -> if (profile.id == target) profile.copy(selectedSourceIds = profile.selectedSourceIds + source.id) else profile },
         ) }
         return source.id
     }
 
     suspend fun refreshSource(sourceId: String): Int = withContext(Dispatchers.IO) {
+        awaitReady()
         val source = mutableState.value.sources.firstOrNull { it.id == sourceId } ?: error("订阅已不存在")
         try {
-            val request = Request.Builder().url(source.url).header("User-Agent", "JichangAndroid/0.5.0").build()
-            val response = http.newCall(request).execute()
-            response.use {
-                if (!it.isSuccessful) error("服务器返回 HTTP ${it.code}")
-                val body = it.body?.string().orEmpty()
-                val result = parser.parse(body, source.id)
+            val request = Request.Builder().url(source.url).header("User-Agent", "JichangAndroid/0.11.0").build()
+            val body = http.newCall(request).readCancellable { response ->
+                if (!response.isSuccessful) error("服务器返回 HTTP ${response.code}")
+                val responseBody = response.body ?: error("订阅内容为空")
+                require(responseBody.contentLength() <= 25L * 1024 * 1024) { "订阅超过 25 MB 限制" }
+                val buffer = java.io.ByteArrayOutputStream()
+                responseBody.byteStream().use { input ->
+                    val chunk = ByteArray(8192)
+                    while (true) {
+                        val count = input.read(chunk)
+                        if (count < 0) break
+                        require(buffer.size() + count <= 25 * 1024 * 1024) { "订阅超过 25 MB 限制" }
+                        buffer.write(chunk, 0, count)
+                    }
+                }
+                buffer.toString("UTF-8")
+            }
+            run {
+                val result = withContext(Dispatchers.Default) { parser.parse(body, source.id) }
                 if (result.nodes.isEmpty()) error("没有解析到可用节点（跳过 ${result.skippedCount} 条）")
                 val providerCompatible = body.trimStart('\uFEFF', ' ', '\n', '\r', '\t').startsWith("proxies:")
+                currentCoroutineContext().ensureActive()
                 update { current ->
+                    if (current.sources.none { it.id == source.id && it.url == source.url }) throw StaleRefreshException()
                     val oldNodes = current.nodes.filter { it.sourceId == source.id }
                     val stableNodes = stabilizeSubscriptionNodes(source.id, oldNodes, result.nodes)
                     val oldIds = oldNodes.map { it.id }.toSet()
                     val freshIds = stableNodes.map { it.id }.toSet()
+                    val removedMembers = (oldIds - freshIds).map { "node:$it" }.toSet()
                     current.copy(
                         sources = current.sources.map { item -> if (item.id == source.id) item.copy(updatedAt = System.currentTimeMillis(), lastError = null, providerCompatible = providerCompatible) else item },
                         nodes = current.nodes.filterNot { node -> node.sourceId == source.id } + stableNodes,
@@ -232,14 +320,27 @@ class JichangRepository(private val dao: SnapshotDao) {
                             val newSelected = stableNodes.filter { it.id !in oldIds && includeNew }.map { it.id }.toSet()
                             val keptSelection = mappedSelected + retained + newSelected
                             val valid = (profile.enabledNodeIds - oldIds) + freshIds
-                            profile.copy(enabledNodeIds = keptSelection.intersect(valid))
+                            profile.copy(enabledNodeIds = keptSelection.intersect(valid), ruleProfile = profile.ruleProfile.copy(
+                                groups = profile.ruleProfile.groups.map { group ->
+                                    val remaining = group.members - removedMembers
+                                    if (remaining != group.members) group.copy(members = remaining, membersExplicit = true) else group
+                                },
+                            ))
                         },
                     )
                 }
                 result.skippedCount
             }
-        } catch (error: Throwable) {
-            update { current -> current.copy(sources = current.sources.map { item -> if (item.id == source.id) item.copy(lastError = error.message ?: "刷新失败") else item }) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: StaleRefreshException) {
+            throw error
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            update { current ->
+                if (current.sources.none { it.id == source.id && it.url == source.url }) throw StaleRefreshException()
+                current.copy(sources = current.sources.map { item -> if (item.id == source.id) item.copy(lastError = error.message ?: "刷新失败") else item })
+            }
             throw error
         }
     }
@@ -256,7 +357,14 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     private fun nodeIdentity(node: ProxyNode): String {
-        val values = linkedMapOf("type" to node.type.lowercase(), "server" to node.server.lowercase(), "port" to node.port, "name" to node.name.trim(), "options" to node.options.filterKeys { it !in setOf("name", "server", "port") })
+        fun canonical(value: Any?): Any? = when (value) {
+            is Map<*, *> -> value.entries.associate { it.key.toString() to canonical(it.value) }.toSortedMap()
+            is List<*> -> value.map(::canonical)
+            is Number -> value.toString().toBigDecimal().stripTrailingZeros()
+            else -> value
+        }
+        val options = node.options.filterKeys { it !in setOf("name", "type", "server", "port") }
+        val values = linkedMapOf("type" to node.type.lowercase(), "server" to node.server.lowercase(), "port" to node.port, "name" to node.name.trim(), "options" to canonical(options))
         return gson.toJson(values)
     }
 
@@ -265,15 +373,18 @@ class JichangRepository(private val dao: SnapshotDao) {
         return "sub-" + digest.take(16).joinToString("") { "%02x".format(it) }
     }
 
-    suspend fun refreshAllSources(onProgress: (String) -> Unit = {}): Pair<Int, Int> {
-        val ids = mutableState.value.sources.map { it.id }
-        var succeeded = 0
-        ids.forEach { id ->
-            onProgress(id)
-            try { refreshSource(id); succeeded++ } catch (_: Throwable) { }
-        }
-        onProgress("")
-        return succeeded to (ids.size - succeeded)
+    suspend fun updateSource(id: String, name: String, url: String) = update { state ->
+        val parsed = URI(url.trim())
+        require(parsed.scheme in setOf("http", "https") && !parsed.host.isNullOrBlank()) { "请输入有效的 HTTP 或 HTTPS 订阅地址" }
+        require(state.sources.any { it.id == id }) { "订阅已不存在" }
+        state.copy(sources = state.sources.map { source ->
+            if (source.id != id) source else source.copy(
+                name = name.trim().ifBlank { parsed.host }, url = url.trim(),
+                updatedAt = if (source.url == url.trim()) source.updatedAt else null,
+                providerCompatible = if (source.url == url.trim()) source.providerCompatible else null,
+                lastError = if (source.url == url.trim()) source.lastError else null,
+            )
+        })
     }
 
     suspend fun removeSource(sourceId: String) = update { state ->
@@ -301,16 +412,19 @@ class JichangRepository(private val dao: SnapshotDao) {
     }
 
     suspend fun importNodes(raw: String): Pair<Int, Int> {
-        val parsed = parser.parse(raw)
+        val target = targetId()
+        val parsed = withContext(Dispatchers.Default) { parser.parse(raw) }
         require(parsed.nodes.isNotEmpty()) { "没有识别到受支持的节点。支持 Mihomo YAML、VMess/VLESS/Trojan/SS 等链接。" }
         update { state -> state.copy(
             nodes = state.nodes + parsed.nodes,
-            profiles = state.profiles.map { profile -> if (profile.id == state.activeProfileId) profile.copy(enabledNodeIds = profile.enabledNodeIds + parsed.nodes.map { it.id }) else profile },
+            profiles = state.profiles.map { profile -> if (profile.id == target) profile.copy(enabledNodeIds = profile.enabledNodeIds + parsed.nodes.map { it.id }) else profile },
         ) }
         return parsed.nodes.size to parsed.skippedCount
     }
 
-    suspend fun toggleNode(nodeId: String) = toggleNode(nodeId, nodeId !in mutableState.value.activeProfile.enabledNodeIds)
+    suspend fun toggleNode(nodeId: String) = updateProfile { profile ->
+        profile.copy(enabledNodeIds = if (nodeId in profile.enabledNodeIds) profile.enabledNodeIds - nodeId else profile.enabledNodeIds + nodeId)
+    }
 
     suspend fun toggleNode(nodeId: String, enabled: Boolean) = updateProfile { profile ->
         profile.copy(enabledNodeIds = if (enabled) profile.enabledNodeIds + nodeId else profile.enabledNodeIds - nodeId)
@@ -483,20 +597,23 @@ class JichangRepository(private val dao: SnapshotDao) {
         profile.copy(ruleProfile = profile.ruleProfile.copy(rules = rules))
     }
 
-    suspend fun saveRuleProfile(profile: RuleProfile) = update { state ->
-        val active = state.activeProfile
-        val previousProviders = active.ruleProfile.providers.associateBy(RuleProvider::id)
-        val unchangedCacheIds = profile.providers.filter { updated ->
-            val previous = previousProviders[updated.id]
-            previous != null && previous.type == updated.type && previous.url == updated.url &&
-                previous.path == updated.path && previous.headers == updated.headers &&
-                previous.behavior == updated.behavior && previous.format == updated.format &&
-                previous.payload == updated.payload
-        }.map(RuleProvider::id).toSet()
-        state.copy(
-            profiles = state.profiles.map { if (it.id == active.id) it.copy(ruleProfile = profile) else it },
-            ruleProviderStatuses = state.ruleProviderStatuses.filter { it.profileId != active.id || it.providerId in unchangedCacheIds },
-        )
+    suspend fun saveRuleProfile(profile: RuleProfile): AppState {
+        val target = targetId()
+        return update { state ->
+            val active = state.profiles.firstOrNull { it.id == target } ?: error("配置已不存在")
+            val previousProviders = active.ruleProfile.providers.associateBy(RuleProvider::id)
+            val unchangedCacheIds = profile.providers.filter { updated ->
+                val previous = previousProviders[updated.id]
+                previous != null && previous.type == updated.type && previous.url == updated.url &&
+                    previous.path == updated.path && previous.headers == updated.headers &&
+                    previous.behavior == updated.behavior && previous.format == updated.format &&
+                    previous.payload == updated.payload
+            }.map(RuleProvider::id).toSet()
+            state.copy(
+                profiles = state.profiles.map { if (it.id == active.id) it.copy(ruleProfile = profile) else it },
+                ruleProviderStatuses = state.ruleProviderStatuses.filter { it.profileId != active.id || it.providerId in unchangedCacheIds },
+            )
+        }
     }
 
     suspend fun saveMihomoSettings(settings: Map<String, Any?>) = updateProfile {
@@ -533,15 +650,55 @@ class JichangRepository(private val dao: SnapshotDao) {
         names.forEach(::visit)
     }
 
-    private suspend fun updateProfile(transform: (ConfigProfile) -> ConfigProfile) = update { state ->
-        state.copy(profiles = state.profiles.map { if (it.id == state.activeProfileId) transform(it) else it })
+    suspend fun reorderRules(profileId: String, expected: List<RoutingRule>, order: List<Int>) = update { state ->
+        val profile = state.profiles.firstOrNull { it.id == profileId } ?: error("配置已不存在")
+        require(profile.ruleProfile.rules == expected) { "规则已发生变化，请重新排序" }
+        require(order.size == expected.size && order.toSet() == expected.indices.toSet()) { "排序内容无效" }
+        val rules = order.map(expected::get)
+        require(rules.dropLast(1).none { it.type.equals("MATCH", true) }) { "MATCH 必须位于末尾" }
+        state.copy(profiles = state.profiles.map { if (it.id == profileId) it.copy(ruleProfile = it.ruleProfile.copy(rules = rules)) else it })
+    }
+
+    /** Cache names are immutable revisions: an outdated response can never overwrite a current cache. */
+    suspend fun commitRuleProviderStatus(expected: RuleProvider, status: RuleProviderStatus) = update { state ->
+        val current = state.profiles.firstOrNull { it.id == status.profileId }?.ruleProfile?.providers?.firstOrNull { it.id == expected.id }
+        if (current != expected) throw StaleRefreshException()
+        state.copy(ruleProviderStatuses = state.ruleProviderStatuses.filterNot { it.profileId == status.profileId && it.providerId == status.providerId } + status)
+    }
+
+    suspend fun deleteSupersededCache(profileId: String, directory: java.io.File, filename: String?) = withContext(Dispatchers.IO) {
+        if (filename == null) return@withContext
+        awaitReady()
+        lock.withLock {
+            val referenced = mutableState.value.ruleProviderStatuses.any { it.profileId == profileId && it.cacheFileName == filename }
+            val file = java.io.File(directory, filename)
+            if (!referenced && file.canonicalFile.parentFile == directory.canonicalFile) file.delete()
+        }
+    }
+
+    private suspend fun updateProfile(transform: (ConfigProfile) -> ConfigProfile): AppState {
+        val target = targetId()
+        val expectedRules = currentCoroutineContext()[RuleSnapshot]?.rules
+        return update { state ->
+            require(expectedRules == null || state.profiles.firstOrNull { it.id == target }?.ruleProfile?.rules == expectedRules) { "规则已发生变化，请重新操作" }
+            require(state.profiles.any { it.id == target }) { "配置已不存在" }
+            state.copy(profiles = state.profiles.map { if (it.id == target) transform(it) else it })
+        }
     }
 
     private suspend fun update(transform: (AppState) -> AppState): AppState = withContext(Dispatchers.IO) {
+        awaitReady()
         lock.withLock {
-            val next = transform(mutableState.value)
-            mutableState.value = next
-            dao.save(SnapshotEntity(payload = gson.toJson(next)))
+            val previous = mutableState.value
+            val next = transform(previous)
+            if (next != previous || snapshotNeedsNormalization) {
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) {
+                    dao.save(SnapshotEntity(payload = gson.toJson(next)))
+                    mutableState.value = next
+                    snapshotNeedsNormalization = false
+                }
+            }
             next
         }
     }

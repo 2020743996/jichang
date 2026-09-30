@@ -2,7 +2,7 @@
 
 Android 上的 **Clash 系列配置管理工具**。在手机上整理节点、订阅和分流规则，生成 Clash 系列 YAML 配置。
 
-**[下载 Android APK](https://github.com/not-power/jichang/releases/latest)** · 支持 Android 13 及以上
+**[下载 Android 0.11.0 APK](https://github.com/not-power/jichang/releases/download/v0.11.0/jichang-v0.11.0.apk)** · 支持 Android 13 及以上
 
 ## 主要功能
 
@@ -10,6 +10,9 @@ Android 上的 **Clash 系列配置管理工具**。在手机上整理节点、�
 - **规则编辑**：管理分流规则、策略组、规则集与子规则；支持搜索、排序、批量操作和配置校验。
 - **Clash 配置生成**：设置常用参数，也可编辑高级 YAML；导出前可校验并预览生成结果。
 - **分享配置**：下载 YAML，或在局域网内通过链接和二维码分享。
+- **跨设备迁移**：通过 `.jichangbackup` 文件与 [Mac 原生版](https://github.com/not-power/jichang-for-Mac) 互相导入和导出完整数据。
+- **刷新与保存**：编辑订阅名称和地址；批量刷新显示进度，支持取消与重试失败项。保存失败保留编辑草稿。
+- **流畅与反馈**：规则拖动排序、成员搜索、分块 YAML 预览；配置菜单中的轻量模式可关闭玻璃效果并保存选择。
 
 ## 界面
 

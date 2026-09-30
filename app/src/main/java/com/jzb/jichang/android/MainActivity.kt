@@ -65,7 +65,6 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -91,7 +90,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -100,11 +98,25 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.saveable.SaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -135,6 +147,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.runtime.rememberUpdatedState
+import com.jzb.jichang.android.service.RuleOrderSession
+import com.jzb.jichang.android.service.RuleRow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.Image
 import androidx.compose.ui.unit.dp
@@ -204,14 +224,19 @@ private fun JichangAlertDialog(
     text: (@Composable () -> Unit)? = null,
     properties: DialogProperties = DialogProperties(),
 ) {
+    val saveState = LocalEditorSaveState.current
     AlertDialog(
-        onDismissRequest = onDismissRequest,
+        onDismissRequest = { if (!saveState.saving) onDismissRequest() },
         confirmButton = confirmButton,
         modifier = modifier,
         dismissButton = dismissButton,
         icon = icon,
         title = title,
-        text = text,
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            text?.invoke()
+            if (saveState.saving) LinearProgressIndicator(Modifier.fillMaxWidth())
+            saveState.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        } },
         shape = MaterialTheme.shapes.large,
         containerColor = MaterialTheme.colorScheme.surface,
         iconContentColor = MaterialTheme.colorScheme.primary,
@@ -244,16 +269,18 @@ private fun FullScreenEditorDialog(
     onSave: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    var confirmDiscard by remember { mutableStateOf(false) }
-    fun requestDismiss() { if (dirty) confirmDiscard = true else onDismiss() }
+    val saveState = LocalEditorSaveState.current
+    var confirmDiscard by rememberSaveable { mutableStateOf(false) }
+    fun requestDismiss() { if (saveState.saving) return; if (dirty) confirmDiscard = true else onDismiss() }
     Dialog(onDismissRequest = ::requestDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column {
+            Column(Modifier.safeDrawingPadding().imePadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::requestDismiss) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
                     Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Button(onClick = onSave, enabled = valid) { Text(saveLabel) }
+                    Button(onClick = onSave, enabled = valid && !saveState.saving) { Text(if (saveState.saving) "保存中…" else saveLabel) }
                 }
+                saveState.error?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
                 Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = JichangSpacing.pageHorizontal)) { content() }
             }
         }
@@ -267,11 +294,11 @@ private fun FullScreenEditorDialog(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun JichangApp(viewModel: AppViewModel = viewModel()) {
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val motionEnabled = remember(context) {
-        runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f }.getOrDefault(true)
-    }
+    val motionEnabled = rememberMotionEnabled()
+    val ready by viewModel.ready.collectAsStateWithLifecycle()
+    val loadError by viewModel.loadError.collectAsStateWithLifecycle()
     val localView = LocalView.current
     SideEffect {
         (context as? Activity)?.window?.let { window ->
@@ -284,11 +311,14 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
     var resourceTab by rememberSaveable { mutableStateOf(ResourceTab.Sources) }
     var ruleSection by rememberSaveable { mutableStateOf(RuleSection.List) }
+    var settingsDirty by remember { mutableStateOf(false) }
+    var confirmSettingsDiscard by rememberSaveable { mutableStateOf(false) }
+    var pendingProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var showYamlPreview by rememberSaveable { mutableStateOf(false) }
-    var dialog by remember { mutableStateOf<DialogKind?>(null) }
+    var dialog by rememberSaveable { mutableStateOf<DialogKind?>(null) }
     var providerInitialType by remember { mutableStateOf<String?>(null) }
-    var editingGroup by remember { mutableStateOf<PolicyGroup?>(null) }
-    var editingRule by remember { mutableStateOf<Pair<Int, com.jzb.jichang.android.model.RoutingRule>?>(null) }
+    var editingGroup by rememberSaveable(stateSaver = jsonSaver<PolicyGroup?>()) { mutableStateOf<PolicyGroup?>(null) }
+    var editingRule by rememberSaveable(stateSaver = jsonSaver<Pair<Int, RoutingRule>?>()) { mutableStateOf<Pair<Int, com.jzb.jichang.android.model.RoutingRule>?>(null) }
     var createProfileFromCurrent by remember { mutableStateOf(true) }
     var profileMenu by remember { mutableStateOf(false) }
     var profileActionMenu by remember { mutableStateOf(false) }
@@ -304,38 +334,53 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     var templateToRename by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
     var templateToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.ConfigTemplate?>(null) }
     var pendingSensitiveAction by remember { mutableStateOf<ExportAction?>(null) }
+    var pendingBackupImport by remember { mutableStateOf<ByteArray?>(null) }
     val glassPreferences = remember(context) { context.getSharedPreferences("appearance", Context.MODE_PRIVATE) }
     var glassOpacity by remember { mutableStateOf(glassPreferences.getFloat("glass_opacity", 0.45f).coerceIn(0.2f, 0.7f)) }
     var appearanceDialog by remember { mutableStateOf(false) }
-    val liquidGlassScene = remember { LiquidGlassScene() }
+    var lightweight by remember { mutableStateOf(glassPreferences.getBoolean("lightweight", false)) }
+    val liquidGlassScene = remember(lightweight) { if (lightweight) null else LiquidGlassScene() }
+    val savedPages = rememberSaveableStateHolder()
     var glassTopRect by remember { mutableStateOf(Rect.Zero) }
     var glassBottomRect by remember { mutableStateOf(Rect.Zero) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(viewModel.message) {
+    LaunchedEffect(viewModel.messageId) {
         viewModel.message?.let { snackbarHostState.showSnackbar(it, duration = if (viewModel.messageIsError) SnackbarDuration.Long else SnackbarDuration.Short) }
     }
     val remoteDownloader = remember { RemoteConfigDownloader() }
     val shareController = remember { LocalShareController(context) }
-    val shareUrl by shareController.url.collectAsState()
-    val shareError by shareController.error.collectAsState()
+    val shareUrl by shareController.url.collectAsStateWithLifecycle()
+    val shareError by shareController.error.collectAsStateWithLifecycle()
     val generator = remember { MihomoConfigGenerator() }
     val profile = state.activeProfile
+    var displayedProfileId by rememberSaveable { mutableStateOf(profile.id) }
     LaunchedEffect(profile.id) {
-        ruleSection = RuleSection.List
-        showYamlPreview = false
+        if (displayedProfileId != profile.id) {
+            ruleSection = RuleSection.List
+            showYamlPreview = false
+            displayedProfileId = profile.id
+        }
     }
     val inDetail = (page == AppPage.Rules && ruleSection != RuleSection.List) || (page == AppPage.Share && showYamlPreview)
+    fun requestDetailBack() {
+        if (viewModel.saving) return
+        if (page == AppPage.Rules && settingsDirty) confirmSettingsDiscard = true
+        else if (page == AppPage.Rules) ruleSection = RuleSection.List else showYamlPreview = false
+    }
     BackHandler(enabled = inDetail || page != AppPage.Home) {
         when {
-            page == AppPage.Rules && ruleSection != RuleSection.List -> ruleSection = RuleSection.List
+            page == AppPage.Rules && ruleSection != RuleSection.List -> requestDetailBack()
             page == AppPage.Share && showYamlPreview -> showYamlPreview = false
             else -> page = AppPage.Home
         }
     }
-    val parsedTemplate = remember(profile.templateId, state.templates) {
-        profile.templateId?.let { id -> state.templates.firstOrNull { it.id == id }?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() } }
+    val activeTemplate = state.templates.firstOrNull { it.id == profile.templateId }
+    val parsedResult = backgroundValue(profile.templateId to activeTemplate?.rawYaml,
+        if (profile.templateId == null) Result.success<com.jzb.jichang.android.service.ParsedMihomoTemplate?>(null) else null) {
+        runCatching { activeTemplate?.let { MihomoTemplateParser().parse(it.rawYaml) } }
     }
+    val parsedTemplate = parsedResult?.getOrNull()
     val exportOptions = remember(profile) {
         ConfigExportOptions(
             sourceMode = runCatching { ConfigSourceMode.valueOf(profile.sourceMode) }.getOrDefault(ConfigSourceMode.EMBED_NODES),
@@ -348,20 +393,24 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     val generationState = remember(state.sources, state.nodes, state.templates, profile) {
         AppState(sources = state.sources, nodes = state.nodes, profiles = listOf(profile), activeProfileId = profile.id, templates = state.templates)
     }
-    val generatedResult by key(generationState, exportOptions) {
+    val generatedResult by key(generationState, exportOptions, parsedResult, ready) {
         produceState<Result<GeneratedConfig>?>(initialValue = null) {
+            if (!ready || parsedResult == null) return@produceState
             value = withContext(Dispatchers.Default) {
-                runCatching { generator.generate(generationState, profile, exportOptions, parsedTemplate) }
+                runCatching { parsedResult.getOrThrow(); generator.generate(generationState, profile, exportOptions, parsedTemplate) }
             }
         }
     }
-    val configReady = generatedResult?.isSuccess == true
-    val generationError = generatedResult?.exceptionOrNull()?.message
     val generated = generatedResult?.getOrNull() ?: emptyGeneratedConfig
     val configText = generated.yaml
-    val validationIssues = remember(state.ruleProfile, state.nodes) {
-        RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet())
+    val validationResult = backgroundValue(state.ruleProfile to state.nodes, null as Result<List<com.jzb.jichang.android.service.RuleIssue>>?) {
+        runCatching { RuleDiagnostics.inspect(state.ruleProfile, state.nodes.map { it.id }.toSet()) }
     }
+    val validationIssues = validationResult?.getOrNull().orEmpty()
+    val blockingValidation = validationIssues.count { !it.warning }
+    val configReady = generatedResult?.isSuccess == true && validationResult?.isSuccess == true && blockingValidation == 0
+    val generationError = generatedResult?.exceptionOrNull()?.message ?: validationResult?.exceptionOrNull()?.message
+        ?: if (blockingValidation > 0) "存在 $blockingValidation 个规则错误，请先修正" else null
     val refreshIssues = remember(state.ruleProviderStatuses, state.ruleProfile.providers, profile.id) {
         state.ruleProviderStatuses.filter { it.profileId == profile.id && !it.error.isNullOrBlank() }
             .mapNotNull { status -> state.ruleProfile.providers.firstOrNull { it.id == status.providerId }?.let { provider ->
@@ -407,6 +456,26 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         }
     }
 
+    val saveBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri: Uri? ->
+        if (uri != null) scope.launch {
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) { viewModel.exportBackup() }
+                withContext(Dispatchers.IO) {
+                    checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法打开目标文件" }.use { it.write(bytes) }
+                }
+            }.onSuccess { viewModel.run { "备份已导出" } }
+                .onFailure { viewModel.run { throw it } }
+        }
+    }
+    val openBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { checkNotNull(context.contentResolver.openInputStream(uri)) { "无法打开备份文件" }.use { it.readBytes() } }
+            }.onSuccess { pendingBackupImport = it }
+                .onFailure { viewModel.run { throw it } }
+        }
+    }
+
     fun startRemoteDownload(url: String, requestedFileName: String) {
         remoteDownloading = true
         remoteError = null
@@ -420,7 +489,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 val rawYaml = String(file.bytes, Charsets.UTF_8)
                 withContext(Dispatchers.Default) { com.jzb.jichang.android.service.MihomoTemplateParser().parse(rawYaml) }
                 val templateName = file.fileName.removeSuffix(".yaml").ifBlank { "远程模板" }
-                viewModel.saveTemplateNow(templateName, rawYaml, file.fileName)
+                viewModel.saveTemplateNow(templateName, rawYaml, file.fileName, url.trim(), System.currentTimeMillis())
                 remoteStatus = "模板“$templateName”已保存到本机"
                 showRemoteConfigDialog = false
             } catch (error: Throwable) {
@@ -453,17 +522,29 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         else if (action == ExportAction.Download) downloadConfig() else shareController.start(configText, filename)
     }
 
+    CompositionLocalProvider(
+        LocalGlassEnabled provides !lightweight,
+        LocalMotionEnabled provides motionEnabled,
+        LocalEditorSaveState provides EditorSaveState(viewModel.saving, viewModel.saveError),
+    ) {
     JichangTheme(glassOpacity = glassOpacity) {
+        if (!ready) {
+            Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                if (loadError == null) { CircularProgressIndicator(); Text("正在读取本机数据…") }
+                else { Text(loadError ?: "无法读取数据", color = MaterialTheme.colorScheme.error); Button(onClick = viewModel::retryLoad) { Text("重试") } }
+            }
+            return@JichangTheme
+        }
         Scaffold(
             modifier = Modifier.fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
                 .graphicsLayer {
-                    liquidGlassScene.shader.setFloatUniform("topRect", glassTopRect.left, glassTopRect.top, glassTopRect.right, glassTopRect.bottom)
-                    liquidGlassScene.shader.setFloatUniform("bottomRect", glassBottomRect.left, glassBottomRect.top, glassBottomRect.right, glassBottomRect.bottom)
-                    liquidGlassScene.shader.setFloatUniform("topRadius", 0f)
-                    liquidGlassScene.shader.setFloatUniform("bottomRadius", 0f)
-                    liquidGlassScene.shader.setFloatUniform("opacity", glassOpacity)
-                    renderEffect = liquidGlassScene.renderEffect
+                    liquidGlassScene?.shader?.setFloatUniform("topRect", glassTopRect.left, glassTopRect.top, glassTopRect.right, glassTopRect.bottom)
+                    liquidGlassScene?.shader?.setFloatUniform("bottomRect", glassBottomRect.left, glassBottomRect.top, glassBottomRect.right, glassBottomRect.bottom)
+                    liquidGlassScene?.shader?.setFloatUniform("topRadius", 0f)
+                    liquidGlassScene?.shader?.setFloatUniform("bottomRadius", 0f)
+                    liquidGlassScene?.shader?.setFloatUniform("opacity", glassOpacity)
+                    renderEffect = liquidGlassScene?.renderEffect
                 },
             contentWindowInsets = WindowInsets(0),
             containerColor = Color.Transparent,
@@ -472,7 +553,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                 TopAppBar(
                     title = { Text(if (page == AppPage.Rules) ruleSection.label else if (showYamlPreview && page == AppPage.Share) "配置预览" else page.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
                     navigationIcon = {
-                        if (inDetail) IconButton(onClick = { if (page == AppPage.Rules) ruleSection = RuleSection.List else showYamlPreview = false }) {
+                        if (inDetail) IconButton(onClick = ::requestDetailBack, enabled = !viewModel.saving) {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                         }
                     },
@@ -488,6 +569,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             Row(
                                 Modifier.clip(RoundedCornerShape(10.dp))
                                     .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { profileMenu = true }
+                                    .heightIn(min = 48.dp)
                                     .padding(horizontal = 8.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -498,11 +580,13 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             DropdownMenu(expanded = profileMenu, onDismissRequest = { profileMenu = false }) {
                                 state.profiles.forEach { item -> DropdownMenuItem(
                                     text = { Text(if (item.id == profile.id) "✓ ${item.name}" else item.name) },
-                                    onClick = { viewModel.switchProfile(item.id); ruleSection = RuleSection.List; showYamlPreview = false; profileMenu = false },
+                                    onClick = { if (settingsDirty) { pendingProfileId = item.id; confirmSettingsDiscard = true } else { viewModel.switchProfile(item.id); ruleSection = RuleSection.List; showYamlPreview = false }; profileMenu = false },
                                 ) }
                                 DropdownMenuItem(text = { Text("新建配置…") }, onClick = { createProfileFromCurrent = true; dialog = DialogKind.Profile; profileMenu = false })
                                 DropdownMenuItem(text = { Text("管理当前配置…") }, onClick = { createProfileFromCurrent = false; dialog = DialogKind.Profile; profileMenu = false })
                                 DropdownMenuItem(text = { Text("外观与玻璃效果") }, onClick = { appearanceDialog = true; profileMenu = false })
+                                DropdownMenuItem(text = { Text("导出设备备份…") }, onClick = { profileMenu = false; saveBackupLauncher.launch("鸡场备份.jichangbackup") })
+                                DropdownMenuItem(text = { Text("导入设备备份…") }, onClick = { profileMenu = false; openBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream")) })
                                 if (state.profiles.size > 1) DropdownMenuItem(text = { Text("删除当前配置") }, onClick = { showProfileDeleteConfirmation = profile.id; profileMenu = false })
                             }
                         }
@@ -551,11 +635,11 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     targetState = page,
                     modifier = Modifier.weight(1f),
                     transitionSpec = {
-                        if (motionEnabled) (fadeIn() + scaleIn(initialScale = 0.99f)).togetherWith(fadeOut())
+                        if (motionEnabled) fadeIn(quickMotion(180)).togetherWith(fadeOut(quickMotion(180)))
                         else EnterTransition.None togetherWith ExitTransition.None
                     },
                     label = "main-page-transition",
-                ) { currentPage -> when (currentPage) {
+                ) { currentPage -> savedPages.SaveableStateProvider("${profile.id}:${currentPage.name}") { when (currentPage) {
                     AppPage.Home -> HomePage(
                         state = state,
                         issues = ruleIssues,
@@ -566,7 +650,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                     )
                     AppPage.Resources -> Column(Modifier.fillMaxSize()) {
                         SegmentedTabs(ResourceTab.entries.map { it.label }, resourceTab.ordinal) { resourceTab = ResourceTab.entries[it] }
-                        when (resourceTab) {
+                        savedPages.SaveableStateProvider("${profile.id}:resource:${resourceTab.name}") { when (resourceTab) {
                             ResourceTab.Sources -> SourcesPage(state, viewModel, { dialog = DialogKind.Source }, Modifier.weight(1f))
                             ResourceTab.Nodes -> NodesPage(
                                 state = state,
@@ -595,6 +679,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             )
                         }
                     }
+                    }
                     AppPage.Rules -> key(profile.id) { RulesPage(
                         state, viewModel, issues = ruleIssues, section = ruleSection, onSectionChange = { ruleSection = it }, modifier = Modifier.fillMaxSize(),
                         templateRoot = parsedTemplate?.rawRoot.orEmpty(),
@@ -603,9 +688,9 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                         onAddRule = { editingRule = null; dialog = DialogKind.Rule },
                         onAddGroup = { editingGroup = null; dialog = DialogKind.Group },
                         onProviders = { type -> providerInitialType = type; dialog = DialogKind.Providers },
-                        onSaveRuleProfile = viewModel::saveRuleProfile,
-                        onSaveMihomoSettings = viewModel::saveMihomoSettings,
-                        onSaveAdvancedYaml = viewModel::saveAdvancedYaml,
+                        onSettingsDirtyChange = { settingsDirty = it },
+                        onSaveMihomoSettings = { settings -> viewModel.save({ viewModel.saveMihomoSettings(settings) }) {} },
+                        onSaveAdvancedYaml = { yaml -> viewModel.save({ viewModel.saveAdvancedYaml(yaml) }) {} },
                     ) }
                     AppPage.Share -> if (showYamlPreview) {
                         if (configReady) YamlPreviewPage(configText, Modifier.fillMaxSize())
@@ -632,10 +717,18 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                                 }, modifier = Modifier.fillMaxSize(),
                             )
 
-                } }
+                } } }
             }
         }
 
+    if (confirmSettingsDiscard) JichangAlertDialog(onDismissRequest = { confirmSettingsDiscard = false; pendingProfileId = null },
+        title = { Text("放弃未保存修改？") }, text = { Text("离开后本次编辑的内容不会保存。") },
+        confirmButton = { TextButton(onClick = {
+            pendingProfileId?.let { viewModel.switchProfile(it) }; pendingProfileId = null
+            confirmSettingsDiscard = false; settingsDirty = false; ruleSection = RuleSection.List
+        }) { Text("放弃修改", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { confirmSettingsDiscard = false; pendingProfileId = null }) { Text("继续编辑") } })
+    LaunchedEffect(dialog) { viewModel.clearSaveError() }
     if (showRemoteConfigDialog) RemoteConfigDialog(
         downloading = remoteDownloading,
         progress = remoteProgress,
@@ -646,14 +739,12 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
 
     templateToPreview?.let { template -> TemplatePreviewDialog(template, onDismiss = { templateToPreview = null }) }
     templateToCreate?.let { template -> TemplateCreateDialog(template, onDismiss = { templateToCreate = null }, onCreate = { name, fileName ->
-        viewModel.createProfileFromTemplate(name, fileName, template.id)
-        templateToCreate = null
-        page = AppPage.Rules
-        ruleSection = RuleSection.List
+        viewModel.save({ viewModel.createProfileFromTemplate(name, fileName, template.id) }) {
+            templateToCreate = null; page = AppPage.Rules; ruleSection = RuleSection.List
+        }
     }) }
     templateToRename?.let { template -> TemplateRenameDialog(template, onDismiss = { templateToRename = null }, onRename = { name ->
-        viewModel.renameTemplate(template.id, name)
-        templateToRename = null
+        viewModel.save({ viewModel.renameTemplate(template.id, name) }) { templateToRename = null }
     }) }
     templateToDelete?.let { template -> JichangAlertDialog(
         onDismissRequest = { templateToDelete = null },
@@ -664,23 +755,21 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
     ) }
 
     when (dialog) {
-        DialogKind.Source -> SourceDialog(onDismiss = { dialog = null }, onSave = { name, url -> viewModel.addSource(name, url); dialog = null })
-        DialogKind.Node -> NodeDialog(onDismiss = { dialog = null }, onSave = { raw -> viewModel.importNodes(raw); dialog = null })
+        DialogKind.Source -> SourceDialog(onDismiss = { dialog = null }, onSave = { name, url -> viewModel.save({ viewModel.addSource(name, url) }) { dialog = null } })
+        DialogKind.Node -> NodeDialog(onDismiss = { dialog = null }, onSave = { raw -> viewModel.save({ viewModel.importNodes(raw) }) { dialog = null } })
         DialogKind.Group -> GroupDialog(state, editingGroup, onDismiss = { dialog = null; editingGroup = null }, onSave = { name, type, members, ruleIndices, providerIds ->
             val existing = editingGroup
-            if (existing == null) viewModel.addGroup(name, type, members, ruleIndices, providerIds) else viewModel.updateGroup(existing.name, name, type, members)
-            dialog = null; editingGroup = null
+            viewModel.save({ if (existing == null) viewModel.addGroup(name, type, members, ruleIndices, providerIds) else viewModel.updateGroup(existing.name, name, type, members) }) { dialog = null; editingGroup = null }
         })
         DialogKind.Rule -> RuleDialog(state, editingRule, onDismiss = { dialog = null; editingRule = null }, onSave = { index, rule ->
-            if (index == null) viewModel.addRule(rule) else viewModel.updateRule(index, rule)
-            dialog = null; editingRule = null
+            viewModel.save({ if (index == null) viewModel.addRule(rule) else viewModel.updateRule(index, rule) }) { dialog = null; editingRule = null }
         })
         DialogKind.Providers -> RuleProvidersDialog(state.ruleProfile, initialProviderType = providerInitialType, onDismiss = { dialog = null }, onSave = { rules ->
-            viewModel.saveRuleProfile(rules); dialog = null
+            viewModel.save({ viewModel.saveRuleProfile(rules) }) { dialog = null }
         })
         DialogKind.Profile -> ProfileDialog(profile, createProfileFromCurrent, onDismiss = { dialog = null }, onCreate = { name, fileName, copy ->
-            viewModel.createProfile(name, fileName, copy); dialog = null
-        }, onSave = { id, name, fileName -> viewModel.updateProfile(id, name, fileName); dialog = null })
+            viewModel.save({ viewModel.createProfile(name, fileName, copy) }) { dialog = null }
+        }, onSave = { id, name, fileName -> viewModel.save({ viewModel.updateProfile(id, name, fileName) }) { dialog = null } })
         null -> Unit
     }
 
@@ -704,6 +793,16 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
         )
     }
 
+    pendingBackupImport?.let { backup ->
+        JichangAlertDialog(
+            onDismissRequest = { pendingBackupImport = null },
+            title = { Text("替换本机数据？") },
+            text = { Text("导入会用备份中的订阅、节点、模板、配置、规则和规则集缓存替换本机现有数据。建议先导出当前备份。") },
+            confirmButton = { TextButton(onClick = { viewModel.save({ viewModel.importBackup(backup) }) { pendingBackupImport = null } }) { Text("替换并恢复") } },
+            dismissButton = { TextButton(onClick = { pendingBackupImport = null }) { Text("取消") } },
+        )
+    }
+
     showProfileDeleteConfirmation?.let { targetId ->
         JichangAlertDialog(onDismissRequest = { showProfileDeleteConfirmation = null }, title = { Text("删除配置？") },
             text = { Text("只会删除此配置的规则和选择，不会删除共享订阅或节点。") },
@@ -716,6 +815,9 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             title = { Text("外观与玻璃效果") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SettingsSwitchRow("轻量模式", "关闭玻璃、模糊和装饰阴影，保留基础动画", lightweight, { value ->
+                        lightweight = value; glassPreferences.edit().putBoolean("lightweight", value).apply()
+                    })
                     Text("透明度　${(glassOpacity * 100).toInt()}%", style = MaterialTheme.typography.titleSmall)
                     Slider(
                         value = glassOpacity,
@@ -723,6 +825,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
                             glassOpacity = value
                             glassPreferences.edit().putFloat("glass_opacity", value).apply()
                         },
+                        enabled = !lightweight,
                         valueRange = 0.2f..0.7f,
                         steps = 9,
                     )
@@ -734,6 +837,7 @@ private fun JichangApp(viewModel: AppViewModel = viewModel()) {
             },
             confirmButton = { TextButton(onClick = { appearanceDialog = false }) { Text("完成") } },
         )
+    }
     }
     }
 }
@@ -781,6 +885,8 @@ private fun HomePage(
 private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> Unit, modifier: Modifier = Modifier) {
     val profile = state.activeProfile
     val nodeCounts = remember(state.nodes) { state.nodes.groupingBy { it.sourceId }.eachCount() }
+    val refresh by viewModel.sourceRefreshProgress.collectAsStateWithLifecycle()
+    var sourceToEdit by rememberSaveable(stateSaver = jsonSaver<com.jzb.jichang.android.model.SubscriptionSource?>()) { mutableStateOf<com.jzb.jichang.android.model.SubscriptionSource?>(null) }
     var sourceToDelete by remember { mutableStateOf<com.jzb.jichang.android.model.SubscriptionSource?>(null) }
     LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.section)) {
         item {
@@ -791,14 +897,15 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                 }
                 Button(onClick = onAdd) { Icon(Icons.Outlined.Add, null); Text("订阅") }
             }
-            TextButton(onClick = { viewModel.refreshAllSources() }, enabled = state.sources.isNotEmpty() && viewModel.refreshingSourceIds.isEmpty()) {
-                if (viewModel.refreshingSourceIds.isNotEmpty()) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            TextButton(onClick = { viewModel.refreshAllSources() }, enabled = state.sources.isNotEmpty() && !refresh.active) {
+                if (refresh.active) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 else Icon(Icons.Outlined.ArrowDownward, null)
                 Spacer(Modifier.width(6.dp)); Text("刷新全部订阅")
             }
         }
+        if (refresh.total > 0) item { RefreshProgressCard(refresh, viewModel::cancelSourceRefresh, viewModel::retryFailedSources) }
         if (state.sources.isEmpty()) item { EmptyCard("还没有订阅", "使用上方按钮添加机场订阅，或到“节点”页直接导入节点链接。") }
-        items(state.sources, key = { it.id }) { source ->
+        items(state.sources, key = { it.id }, contentType = { "source" }) { source ->
             var menuExpanded by remember(source.id) { mutableStateOf(false) }
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(JichangSpacing.card), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -811,17 +918,20 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
                         Box {
                             IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, "订阅操作") }
                             DropdownMenu(menuExpanded, { menuExpanded = false }) {
-                                DropdownMenuItem(text = { Text("刷新") }, enabled = source.id !in viewModel.refreshingSourceIds, onClick = { menuExpanded = false; viewModel.refreshSource(source.id) })
+                                DropdownMenuItem(text = { Text("刷新") }, enabled = !refresh.active, onClick = { menuExpanded = false; viewModel.refreshSource(source.id) })
+                                DropdownMenuItem(text = { Text("编辑") }, enabled = !refresh.active, onClick = { menuExpanded = false; viewModel.clearSaveError(); sourceToEdit = source })
                                 DropdownMenuItem(text = { Text("删除") }, onClick = { menuExpanded = false; sourceToDelete = source })
                             }
                         }
                     }
                     val count = nodeCounts[source.id] ?: 0
                     Text(
-                        if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 已更新" } ?: " · 尚未刷新"}",
+                        if (source.lastError != null) source.lastError else "$count 个节点${source.updatedAt?.let { " · 更新于 ${java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(it))}" } ?: " · 尚未刷新"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = if (source.lastError != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (source.id in refresh.runningIds) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (source.lastError != null) TextButton(enabled = !refresh.active, onClick = { viewModel.refreshSource(source.id) }) { Text("重试刷新") }
                     if (source.id in profile.selectedSourceIds) when (source.providerCompatible) {
                         true -> Text("已检测为 Mihomo YAML，可在配置中远程引用。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         false -> Text("此订阅不是 Mihomo YAML；引用模式会把已解析节点内嵌。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -831,6 +941,8 @@ private fun SourcesPage(state: AppState, viewModel: AppViewModel, onAdd: () -> U
             }
         }
     }
+    sourceToEdit?.let { source -> SourceDialog(onDismiss = { sourceToEdit = null }, initial = source,
+        onSave = { name, url -> viewModel.save({ viewModel.updateSource(source.id, name, url) }) { sourceToEdit = null } }) }
     sourceToDelete?.let { source -> JichangAlertDialog(onDismissRequest = { sourceToDelete = null },
         title = { Text("删除订阅？") }, text = { Text("将删除“${source.name}”及其导入的节点。") },
         confirmButton = { TextButton(onClick = { viewModel.removeSource(source.id); sourceToDelete = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
@@ -845,15 +957,15 @@ private fun NodesPage(
     onAdd: () -> Unit,
     onRegionChange: (String, String?) -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
-    var protocolFilter by remember { mutableStateOf("全部协议") }
-    var sourceFilter by remember { mutableStateOf("全部来源") }
-    var enabledFilter by remember { mutableStateOf("全部") }
-    var regionFilter by remember { mutableStateOf("全部地区") }
-    var filtersExpanded by remember { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var protocolFilter by rememberSaveable { mutableStateOf("全部协议") }
+    var sourceFilter by rememberSaveable { mutableStateOf("全部来源") }
+    var enabledFilter by rememberSaveable { mutableStateOf("全部") }
+    var regionFilter by rememberSaveable { mutableStateOf("全部地区") }
+    var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     var bulkActions by remember { mutableStateOf(false) }
     var expandedProtocol by remember { mutableStateOf(false) }
-    var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
+    var editingNode by rememberSaveable(stateSaver = jsonSaver<ProxyNode?>()) { mutableStateOf<ProxyNode?>(null) }
     var nodeToDelete by remember { mutableStateOf<ProxyNode?>(null) }
     val profile = state.activeProfile
     val regionKeys = NodeAutoGroups.regions.map { it.key } + NodeAutoGroups.OTHER
@@ -861,9 +973,10 @@ private fun NodesPage(
     val protocols = remember(state.nodes) { listOf("全部协议") + state.nodes.map { it.type.uppercase() }.distinct().sorted() }
     val sourceNames = remember(state.sources) { state.sources.associate { it.id to it.name } }
     val filtersActive = protocolFilter != "全部协议" || sourceFilter != "全部来源" || enabledFilter != "全部" || regionFilter != "全部地区"
-    val filtered = remember(state.nodes, profile, sourceNames, query, protocolFilter, sourceFilter, enabledFilter, regionFilter) {
+    val settledQuery = debouncedQuery(query)
+    val filtered = backgroundValue(listOf(state.nodes, profile.enabledNodeIds, profile.regionOverrides, sourceNames, settledQuery, protocolFilter, sourceFilter, enabledFilter, regionFilter), emptyList<ProxyNode>()) {
         state.nodes.filter { node ->
-            (query.isBlank() || node.name.contains(query, true) || node.server.contains(query, true)) &&
+            (settledQuery.isBlank() || node.name.contains(settledQuery, true) || node.server.contains(settledQuery, true)) &&
                 (protocolFilter == "全部协议" || node.type.equals(protocolFilter, true)) &&
                 (sourceFilter == "全部来源" || (sourceFilter == "手动导入" && node.sourceId == null) || node.sourceId?.let(sourceNames::get) == sourceFilter) &&
                 (enabledFilter == "全部" || (node.id in profile.enabledNodeIds) == (enabledFilter == "已启用")) &&
@@ -895,7 +1008,7 @@ private fun NodesPage(
                     TextButton(onClick = { bulkActions = !bulkActions }, enabled = filtered.isNotEmpty() || bulkActions) { Text(if (bulkActions) "完成" else "批量操作") }
                 }
                 if (filtersActive) TextButton(onClick = { protocolFilter = "全部协议"; sourceFilter = "全部来源"; enabledFilter = "全部"; regionFilter = "全部地区" }) { Text("清除筛选") }
-                if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                AnimatedVisibility(filtersExpanded, enter = fadeIn(quickMotion(if (LocalMotionEnabled.current) 160 else 0)) + expandVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0)), exit = fadeOut(quickMotion(if (LocalMotionEnabled.current) 120 else 0)) + shrinkVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0))) { Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
                     Box(Modifier.weight(1f)) {
                         OutlinedButton(onClick = { expandedProtocol = true }, modifier = Modifier.fillMaxWidth()) {
                             Text(protocolFilter, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -906,20 +1019,20 @@ private fun NodesPage(
                         }
                     }
                     ChoiceMenu(regionFilter, regions, { regionFilter = it }, Modifier.weight(1f))
-                }
-                if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
+                } }
+                AnimatedVisibility(filtersExpanded, enter = fadeIn(quickMotion(if (LocalMotionEnabled.current) 160 else 0)) + expandVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0)), exit = fadeOut(quickMotion(if (LocalMotionEnabled.current) 120 else 0)) + shrinkVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0))) { Row(horizontalArrangement = Arrangement.spacedBy(JichangSpacing.item), modifier = Modifier.fillMaxWidth()) {
                     ChoiceMenu(sourceFilter, listOf("全部来源", "手动导入") + state.sources.map { it.name }, { sourceFilter = it }, Modifier.weight(1f))
                     DropdownMenuFilter(enabledFilter, { enabledFilter = it }, Modifier.weight(1f))
-                }
-                if (bulkActions) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                } }
+                AnimatedVisibility(bulkActions, enter = fadeIn(quickMotion(if (LocalMotionEnabled.current) 160 else 0)) + expandVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0)), exit = fadeOut(quickMotion(if (LocalMotionEnabled.current) 120 else 0)) + shrinkVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0))) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), true); bulkActions = false }, enabled = filtered.isNotEmpty()) { Text("启用筛选结果") }
                     TextButton(onClick = { viewModel.setNodesEnabled(filtered.map { it.id }.toSet(), false); bulkActions = false }, enabled = filtered.isNotEmpty()) { Text("停用筛选结果") }
-                }
+                } }
             }
         }
         if (state.nodes.isEmpty()) item { EmptyCard("还没有节点", "使用上方按钮导入 Mihomo YAML、Base64 订阅或节点链接。") }
         else if (filtered.isEmpty()) item { EmptyCard("没有匹配的节点", "换个搜索词或清除筛选条件。") }
-        else items(filtered, key = { it.id }) { node ->
+        else items(filtered, key = { it.id }, contentType = { "node" }) { node ->
             val region = profile.regionOverrides[node.id] ?: NodeAutoGroups.classify(node.name)
             NodeRow(
                 node = node,
@@ -941,7 +1054,7 @@ private fun NodesPage(
         }
     }
     editingNode?.let { node -> NodeEditDialog(node, onDismiss = { editingNode = null }, onSave = { name, type, server, port, options ->
-        viewModel.updateNode(node.id, name, type, server, port, options); editingNode = null
+        viewModel.save({ viewModel.updateNode(node.id, name, type, server, port, options) }) { editingNode = null }
     }) }
     nodeToDelete?.let { node -> JichangAlertDialog(onDismissRequest = { nodeToDelete = null }, title = { Text("删除节点？") },
         text = { Text("将从本机删除“${node.name}”。") },
@@ -1038,13 +1151,16 @@ private fun MihomoSettingsPage(
     templateRoot: Map<String, Any?>,
     onSave: (Map<String, Any?>) -> Unit,
     modifier: Modifier = Modifier,
+    onDirtyChange: (Boolean) -> Unit = {},
 ) {
     val base = remember(profile.id, profile.mihomoSettings, templateRoot) {
         MihomoSettings.effectiveVisualSettings(templateRoot, profile)
     }
-    var values by remember(profile.id, profile.mihomoSettings, templateRoot) { mutableStateOf(base) }
+    var values by rememberSaveable(profile.id, profile.mihomoSettings, templateRoot, stateSaver = jsonSaver<Map<String, Any?>>()) { mutableStateOf(base) }
     var error by remember(profile.id) { mutableStateOf<String?>(null) }
     val changed = values != base
+    SideEffect { onDirtyChange(changed) }
+    DisposableEffect(Unit) { onDispose { onDirtyChange(false) } }
 
     fun setRoot(key: String, value: Any?) {
         values = LinkedHashMap(values).apply { if (value == null) remove(key) else put(key, value) }
@@ -1067,7 +1183,7 @@ private fun MihomoSettingsPage(
     fun checked(blockKey: String, field: String, fallback: Boolean = false): Boolean =
         (block(blockKey)[field] as? Boolean) ?: fallback
 
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.imePadding().fillMaxSize()) {
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1168,14 +1284,31 @@ private fun AdvancedYamlPage(
     templateRoot: Map<String, Any?>,
     onSave: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onDirtyChange: (Boolean) -> Unit = {},
 ) {
     val initial = remember(profile.id, profile.advancedYaml, templateRoot) {
         profile.advancedYaml ?: MihomoSettings.dumpAdvancedFields(templateRoot)
     }
-    var yaml by remember(profile.id, initial) { mutableStateOf(initial) }
+    var yaml by rememberSaveable(profile.id, initial) { mutableStateOf(initial) }
     var error by remember(profile.id) { mutableStateOf<String?>(null) }
     var validation by remember(profile.id) { mutableStateOf<String?>(null) }
-    Column(modifier.fillMaxSize().padding(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    SideEffect { onDirtyChange(yaml != initial) }
+    DisposableEffect(Unit) { onDispose { onDirtyChange(false) } }
+    val editorScope = rememberCoroutineScope()
+    var validating by remember { mutableStateOf(false) }
+    fun validate(save: Boolean) {
+        if (validating) return
+        val draft = yaml
+        validating = true
+        editorScope.launch {
+            try {
+                val result = withContext(Dispatchers.Default) { runCatching { MihomoSettings.validateAdvancedYaml(draft) } }
+                if (yaml == draft) result.onSuccess { error = null; if (save) { validation = null; onSave(draft) } else validation = "YAML 有效 · ${it.size} 个顶层字段" }
+                    .onFailure { error = it.message ?: "高级 YAML 无效"; validation = null }
+            } finally { validating = false }
+        }
+    }
+    Column(modifier.imePadding().fillMaxSize().padding(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("高级 YAML", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         Text("仅编辑表单未管理的 Mihomo 字段。代理、策略组、规则、规则集和可视化设置字段不能在这里覆盖；DNS、TUN 等区块中未由表单展示的字段仍可编辑。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedTextField(
@@ -1190,16 +1323,8 @@ private fun AdvancedYamlPage(
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         validation?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-            OutlinedButton(onClick = {
-                runCatching { MihomoSettings.validateAdvancedYaml(yaml) }
-                    .onSuccess { error = null; validation = "YAML 有效 · ${it.size} 个顶层字段" }
-                    .onFailure { error = it.message ?: "高级 YAML 无效"; validation = null }
-            }) { Text("校验") }
-            Button(onClick = {
-                runCatching { MihomoSettings.validateAdvancedYaml(yaml) }
-                    .onSuccess { error = null; validation = null; onSave(yaml) }
-                    .onFailure { error = it.message ?: "高级 YAML 无效" }
-            }) { Text("保存高级字段") }
+            OutlinedButton(onClick = { validate(false) }, enabled = !validating) { Text(if (validating) "校验中…" else "校验") }
+            Button(onClick = { validate(true) }, enabled = !validating && yaml != initial) { Text("保存高级字段") }
         }
     }
 }
@@ -1256,15 +1381,16 @@ private fun RulesPage(
     onAddRule: () -> Unit,
     onAddGroup: () -> Unit,
     onProviders: (String?) -> Unit,
-    onSaveRuleProfile: (RuleProfile) -> Unit,
     templateRoot: Map<String, Any?>,
     onSaveMihomoSettings: (Map<String, Any?>) -> Unit,
     onSaveAdvancedYaml: (String) -> Unit,
+    onSettingsDirtyChange: (Boolean) -> Unit = {},
 ) {
-    var query by remember(state.activeProfile.id) { mutableStateOf("") }
-    var category by remember(state.activeProfile.id) { mutableStateOf("全部类型") }
-    var strategy by remember(state.activeProfile.id) { mutableStateOf("全部策略") }
-    var filtersExpanded by remember(state.activeProfile.id) { mutableStateOf(false) }
+    val providerRefresh by viewModel.providerRefreshProgress.collectAsStateWithLifecycle()
+    var query by rememberSaveable(state.activeProfile.id) { mutableStateOf("") }
+    var category by rememberSaveable(state.activeProfile.id) { mutableStateOf("全部类型") }
+    var strategy by rememberSaveable(state.activeProfile.id) { mutableStateOf("全部策略") }
+    var filtersExpanded by rememberSaveable(state.activeProfile.id) { mutableStateOf(false) }
     var selecting by remember(state.activeProfile.id) { mutableStateOf(false) }
     var selectedRules by remember(state.activeProfile.id) { mutableStateOf(setOf<Int>()) }
     var deleting by remember { mutableStateOf(false) }
@@ -1273,7 +1399,7 @@ private fun RulesPage(
     var showSimulator by remember { mutableStateOf(false) }
     var showTemplateRuleSetApply by remember { mutableStateOf(false) }
     var addProviderMenu by remember { mutableStateOf(false) }
-    var providerFilter by remember(state.activeProfile.id) { mutableStateOf("全部来源") }
+    var providerFilter by rememberSaveable(state.activeProfile.id) { mutableStateOf("全部来源") }
     var focusedProviderId by remember { mutableStateOf<String?>(null) }
     var focusedSubRuleName by remember { mutableStateOf<String?>(null) }
     var bulkTarget by remember { mutableStateOf("") }
@@ -1285,18 +1411,20 @@ private fun RulesPage(
     val categories = listOf("全部类型", "域名", "IP 与地理", "端口与网络", "进程", "规则集", "逻辑与兜底")
     val filtered = query.isNotBlank() || category != "全部类型" || strategy != "全部策略"
     val lastMovableIndex = state.ruleProfile.rules.lastIndex - if (state.ruleProfile.rules.any { it.type == "MATCH" }) 1 else 0
-    val visibleRules = remember(section, state.ruleProfile.rules, query, category, strategy) {
-        if (section != RuleSection.List) emptyList() else state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (_, rule) ->
-            val matchesText = query.isBlank() || run {
-                val conditionText = buildString {
-                    fun appendCondition(condition: RuleCondition) {
-                        append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty())
-                        condition.children.forEach(::appendCondition)
-                    }
-                    rule.conditions.forEach(::appendCondition)
-                }
-                listOf(rule.type, rule.value, rule.group, rule.rawLine.orEmpty(), rule.extraParameters.joinToString(" "), conditionText).any { it.contains(query, true) }
+    val settledQuery = debouncedQuery(query)
+    val searchTexts = backgroundValue(state.ruleProfile.rules, emptyList<String>()) {
+        state.ruleProfile.rules.map { rule -> buildString {
+            append(rule.type); append(' '); append(rule.value); append(' '); append(rule.group); append(' '); append(rule.rawLine.orEmpty()); append(' '); append(rule.extraParameters.joinToString(" "))
+            fun conditionText(condition: RuleCondition) {
+                append(' '); append(condition.type.orEmpty()); append(' '); append(condition.value); append(' '); append(condition.argument.orEmpty())
+                condition.children.forEach(::conditionText)
             }
+            rule.conditions.forEach(::conditionText)
+        } }
+    }
+    val searchedRules = backgroundValue(listOf(section, state.ruleProfile.rules, settledQuery, category, strategy, searchTexts), emptyList<Pair<Int, RoutingRule>>()) {
+        if (section != RuleSection.List) emptyList() else state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }.filter { (index, rule) ->
+            val matchesText = settledQuery.isBlank() || searchTexts.getOrNull(index)?.contains(settledQuery, true) == true
             val matchesStrategy = strategy == "全部策略" || rule.group == strategy
             val matchesCategory = when (category) {
                 "域名" -> rule.type.startsWith("DOMAIN") || rule.type == "GEOSITE"
@@ -1310,8 +1438,79 @@ private fun RulesPage(
             matchesText && matchesStrategy && matchesCategory
         }
     }
+    // Unfiltered rows must remain present during commits so LazyColumn keeps its anchor.
+    val visibleRules = if (filtered) searchedRules else remember(state.ruleProfile.rules) {
+        state.ruleProfile.rules.mapIndexed { index, rule -> index to rule }
+    }
+    val ruleListState = rememberLazyListState()
+    val reorder = remember(state.activeProfile.id) { RuleOrderSession(state.ruleProfile.rules) }
+    var order by remember(state.activeProfile.id) { mutableStateOf(reorder.rows) }
+    var draggedKey by remember { mutableStateOf<Long?>(null) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    var dragStartOffset by remember { mutableStateOf(0f) }
+    var dragItemHeight by remember { mutableStateOf(0f) }
+    var listRootY by remember { mutableStateOf(0f) }
+    var lastDragRootY by remember { mutableStateOf(0f) }
+    var pointerY by remember { mutableStateOf(0f) }
+    var orderSaving by remember { mutableStateOf(false) }
+    val dragScope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val motion = LocalMotionEnabled.current
+    val positions = remember(order) { order.mapIndexed { index, row -> row.key to index }.toMap() }
+    val visibleIndices = remember(visibleRules) { visibleRules.map { it.first }.toSet() }
+    LaunchedEffect(state.ruleProfile.rules) {
+        if (state.ruleProfile.rules != reorder.snapshot) {
+            draggedKey = null; dragOffset = 0f
+            order = reorder.accept(state.ruleProfile.rules, order)
+            selectedRules = emptySet()
+        }
+    }
+    fun cancelDrag() { draggedKey = null; dragOffset = 0f; order = reorder.rows }
+    fun updateDrag(delta: Float) {
+        val key = draggedKey ?: return
+        dragOffset += delta
+        pointerY += delta
+        val center = dragStartOffset + dragItemHeight / 2f + dragOffset
+        val target = ruleListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Long && it.key != key && center in it.offset.toFloat()..(it.offset + it.size).toFloat() }
+        if (target != null) {
+            val destination = order.indexOfFirst { it.key == target.key }
+            if (destination >= 0) {
+                val changed = reorder.moved(order, key, destination)
+                if (changed != order) {
+                    order = changed
+                }
+            }
+        }
+    }
+    fun persistOrder() {
+        val expected = reorder.snapshot
+        val submitted = order
+        draggedKey = null; dragOffset = 0f
+        if (submitted.map { it.originalIndex } == expected.indices.toList()) return
+        orderSaving = true
+        dragScope.launch {
+            try {
+                val saved = viewModel.reorderRules(state.activeProfile.id, expected, submitted.map { it.originalIndex }).await()
+                order = if (saved) reorder.accept(submitted.map { it.rule }, submitted) else reorder.rows
+            } finally { orderSaving = false }
+        }
+    }
+    LaunchedEffect(draggedKey) {
+        while (draggedKey != null && isActive) {
+            val layout = ruleListState.layoutInfo
+            val speed = when {
+                pointerY < layout.viewportStartOffset + 72 -> -12f
+                pointerY > layout.viewportEndOffset - 72 -> 12f
+                else -> 0f
+            }
+            if (speed != 0f) { ruleListState.scroll { scrollBy(speed) }; updateDrag(0f) }
+            delay(16)
+        }
+    }
+    BackHandler(enabled = draggedKey != null) { cancelDrag() }
+    LaunchedEffect(section, query, category, strategy, selecting) { if (draggedKey != null) cancelDrag() }
     when (section) {
-        RuleSection.List -> LazyColumn(modifier, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.item)) {
+        RuleSection.List -> LazyColumn(modifier.onGloballyPositioned { listRootY = it.positionInRoot().y }, state = ruleListState, userScrollEnabled = draggedKey == null && !orderSaving, contentPadding = PaddingValues(horizontal = JichangSpacing.pageHorizontal, vertical = JichangSpacing.pageVertical), verticalArrangement = Arrangement.spacedBy(JichangSpacing.item)) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("分流规则", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
@@ -1331,10 +1530,10 @@ private fun RulesPage(
                         TextButton(onClick = { filtersExpanded = !filtersExpanded }) { Text(if (filtersExpanded) "收起筛选" else "筛选") }
                         TextButton(onClick = { showSimulator = true }) { Text("模拟") }
                     }
-                    if (filtersExpanded) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AnimatedVisibility(filtersExpanded, enter = fadeIn(quickMotion(if (LocalMotionEnabled.current) 160 else 0)) + expandVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0)), exit = fadeOut(quickMotion(if (LocalMotionEnabled.current) 120 else 0)) + shrinkVertically(quickMotion(if (LocalMotionEnabled.current) 160 else 0))) { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ChoiceMenu(category, categories, { category = it; selectedRules = emptySet() }, Modifier.weight(1f))
                         ChoiceMenu(strategy, listOf("全部策略") + targetNames, { strategy = it; selectedRules = emptySet() }, Modifier.weight(1f))
-                    }
+                    } }
                     if (filtered) Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("筛选期间暂停排序。", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         TextButton(onClick = { query = ""; category = "全部类型"; strategy = "全部策略"; selectedRules = emptySet() }) { Text("清除筛选") }
@@ -1343,7 +1542,7 @@ private fun RulesPage(
                         Text("管理", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         TextButton(onClick = { selecting = !selecting; selectedRules = emptySet() }, enabled = state.ruleProfile.rules.any { it.type != "MATCH" } || selecting) { Text(if (selecting) "取消选择" else "批量操作") }
                     }
-                    if (selecting && selectedRules.isNotEmpty()) {
+                    AnimatedVisibility(selecting && selectedRules.isNotEmpty(), enter = fadeIn(quickMotion(if (motion) 160 else 0)), exit = fadeOut(quickMotion(if (motion) 120 else 0))) {
                         Text("已选 ${selectedRules.size} 条", style = MaterialTheme.typography.labelMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.weight(1f)) { SelectField("更改目标", bulkTarget, targetNames) { bulkTarget = it } }
@@ -1368,12 +1567,32 @@ private fun RulesPage(
             }
             if (state.ruleProfile.rules.isEmpty()) item { EmptyCard("还没有分流规则", "添加规则，或从规则集页面应用模板规则。") }
             else if (visibleRules.isEmpty()) item { EmptyCard("没有符合条件的规则", "清除搜索词或筛选条件后再试。") }
-            else items(visibleRules, key = { it.first }) { (index, rule) ->
-                RuleListCard(rule = rule, onEdit = { onEditRule(index, rule) }, onMoveUp = { viewModel.moveRule(index, -1) }, onMoveDown = { viewModel.moveRule(index, 1) },
-                    onDelete = { deletingIndex = index }, canMoveUp = !filtered && index > 0 && rule.type != "MATCH", canMoveDown = !filtered && index < lastMovableIndex && rule.type != "MATCH",
+            else items(order.filter { it.originalIndex in visibleIndices }, key = { it.key }, contentType = { "routing-rule" }) { row ->
+                val index = row.originalIndex
+                val rule = row.rule
+                val position = positions.getValue(row.key)
+                RuleListCard(rule = rule,
+                    positionLabel = if (draggedKey == row.key) "第 ${position + 1} / ${order.size} 条" else null,
+                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = if (motion && draggedKey != row.key) androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 550f) else null)
+                        .zIndex(if (draggedKey == row.key) 1f else 0f).graphicsLayer { translationY = if (draggedKey == row.key) dragStartOffset + dragOffset - (ruleListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == row.key }?.offset ?: dragStartOffset.toInt()) else 0f; shadowElevation = if (draggedKey == row.key) 8.dp.toPx() else 0f },
+                    onEdit = { if (!orderSaving && draggedKey == null) onEditRule(index, rule) },
+                    onMoveUp = { if (!orderSaving) { order = reorder.moved(order, row.key, position - 1); persistOrder() } },
+                    onMoveDown = { if (!orderSaving) { order = reorder.moved(order, row.key, position + 1); persistOrder() } },
+                    onDelete = { if (!orderSaving && draggedKey == null) deletingIndex = index },
+                    canMoveUp = !filtered && position > 0 && !orderSaving && rule.type != "MATCH",
+                    canMoveDown = !filtered && position < lastMovableIndex && !orderSaving && rule.type != "MATCH",
                     selectable = selecting && !rule.type.equals("MATCH", true), checked = index in selectedRules,
                     onCheckedChange = { checked -> selectedRules = if (checked) selectedRules + index else selectedRules - index },
-                    onDuplicate = { viewModel.duplicateRule(index) }, showReorder = !filtered && !selecting)
+                    onDuplicate = { if (!orderSaving && draggedKey == null) viewModel.duplicateRule(index) }, showReorder = !filtered && !selecting && !orderSaving,
+                    onDragStart = { rootY -> if (!orderSaving) {
+                        lastDragRootY = rootY
+                        draggedKey = row.key; dragOffset = 0f
+                        val item = ruleListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == row.key }
+                        dragStartOffset = item?.offset?.toFloat() ?: 0f
+                        dragItemHeight = item?.size?.toFloat() ?: 0f
+                        pointerY = rootY - listRootY
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    } }, onDrag = { rootY -> val delta = rootY - lastDragRootY; lastDragRootY = rootY; updateDrag(delta) }, onDragEnd = ::persistOrder, onDragCancel = ::cancelDrag)
             }
         }
         RuleSection.Groups -> Column(modifier.padding(horizontal = JichangSpacing.pageHorizontal)) {
@@ -1412,11 +1631,12 @@ private fun RulesPage(
             ChoiceMenu(providerFilter, listOf("全部来源", "来自模板", "远程", "本机"), { providerFilter = it }, Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
-                    enabled = state.ruleProfile.providers.any { it.type.equals("http", true) } && !viewModel.refreshingAllRuleProviders && viewModel.refreshingRuleProviderIds.isEmpty(),
+                    enabled = state.ruleProfile.providers.any { it.type.equals("http", true) } && !providerRefresh.active && viewModel.refreshingRuleProviderIds.isEmpty(),
                     onClick = { viewModel.refreshAllRuleProviders(state.activeProfile) },
-                ) { Text(if (viewModel.refreshingAllRuleProviders) "刷新中…" else "刷新全部远程") }
+                ) { Text(if (providerRefresh.active) "刷新中…" else "刷新全部远程") }
                 TextButton(onClick = { onProviders(null) }) { Text("管理") }
             }
+            if (providerRefresh.total > 0) RefreshProgressCard(providerRefresh, viewModel::cancelProviderRefresh, { viewModel.retryFailedRuleProviders(state.activeProfile) })
             val providers = state.ruleProfile.providers.filter { provider -> when (providerFilter) {
                 "来自模板" -> provider.sourceTemplateId != null
                 "远程" -> provider.sourceTemplateId == null && provider.type == "http"
@@ -1425,9 +1645,9 @@ private fun RulesPage(
             } }
             if (providers.isEmpty()) EmptyCard("没有规则集", if (state.ruleProfile.providers.isEmpty()) "可从模板应用，或添加远程和本机规则集。" else "当前来源没有规则集。")
             else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)) {
-                items(providers, key = { it.id }) { provider ->
+                items(providers, key = { it.id }, contentType = { "provider" }) { provider ->
                     val status = state.ruleProviderStatuses.firstOrNull { it.profileId == state.activeProfile.id && it.providerId == provider.id }
-                    val refreshing = provider.id in viewModel.refreshingRuleProviderIds
+                    val refreshing = provider.id in providerRefresh.requestedIds && providerRefresh.active
                     val originLabel = when {
                         provider.sourceTemplateId != null -> "来自模板${provider.sourceTemplateName?.let { " · $it" }.orEmpty()}"
                         provider.type == "http" -> "远程"
@@ -1439,7 +1659,7 @@ private fun RulesPage(
                             Text("$originLabel · ${provider.behavior} · ${provider.format}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(status?.error?.let { "刷新失败：$it" } ?: status?.refreshedAt?.let { "上次刷新 ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}" } ?: if (provider.type == "inline") "内嵌 ${provider.payload.size} 项" else "尚未刷新", style = MaterialTheme.typography.labelSmall, color = if (status?.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                             Row {
-                                if (provider.type == "http") TextButton(enabled = !refreshing && !viewModel.refreshingAllRuleProviders, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
+                                if (provider.type == "http") TextButton(enabled = !refreshing && !providerRefresh.active, onClick = { viewModel.refreshRuleProvider(state.activeProfile, provider) }) { Text(if (refreshing) "刷新中…" else "刷新") }
                                 TextButton(onClick = { viewModel.previewRuleProvider(state.activeProfile, provider, status) }) { Text("预览") }
                                 TextButton(onClick = { onProviders("edit:${provider.id}") }) { Text("编辑") }
                             }
@@ -1491,12 +1711,14 @@ private fun RulesPage(
             templateRoot = templateRoot,
             onSave = onSaveMihomoSettings,
             modifier = modifier,
+            onDirtyChange = onSettingsDirtyChange,
         )
         RuleSection.Advanced -> AdvancedYamlPage(
             profile = state.activeProfile,
             templateRoot = templateRoot,
             onSave = onSaveAdvancedYaml,
             modifier = modifier,
+            onDirtyChange = onSettingsDirtyChange,
         )
     }
     if (deleting) JichangAlertDialog(onDismissRequest = { deleting = false }, title = { Text("删除所选规则？") },
@@ -1514,7 +1736,9 @@ private fun RulesPage(
         dismissButton = { TextButton(onClick = { groupToDelete = null }) { Text("取消") } }) }
     if (showSimulator) RuleSimulationDialog(state.activeProfile, state.ruleProviderStatuses, onDismiss = { showSimulator = false })
     if (showTemplateRuleSetApply) TemplateRuleSetApplyDialog(templates = state.templates, current = state.ruleProfile,
-        onDismiss = { showTemplateRuleSetApply = false }, onApply = { updated -> onSaveRuleProfile(updated); showTemplateRuleSetApply = false })
+        onDismiss = { showTemplateRuleSetApply = false }, onApply = { updated ->
+            viewModel.save({ viewModel.saveRuleProfile(updated) }) { showTemplateRuleSetApply = false }
+        })
     viewModel.ruleProviderPreview?.let { (name, content) -> JichangAlertDialog(onDismissRequest = viewModel::dismissRuleProviderPreview,
         title = { Text("规则集预览：$name") }, text = { Column(Modifier.heightIn(max = 540.dp).verticalScroll(rememberScrollState())) { Text(content, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) } },
         confirmButton = { TextButton(onClick = viewModel::dismissRuleProviderPreview) { Text("关闭") } }) }
@@ -1528,16 +1752,18 @@ private fun TemplateRuleSetApplyDialog(
     onApply: (RuleProfile) -> Unit,
 ) {
     val names = templates.map { it.name }
-    var templateName by remember(templates) { mutableStateOf(names.firstOrNull().orEmpty()) }
+    var templateName by rememberSaveable { mutableStateOf(names.firstOrNull().orEmpty()) }
     val template = templates.firstOrNull { it.name == templateName }
-    val parsed = remember(template?.id, template?.rawYaml) {
+    val parsed = backgroundValue(template?.id to template?.rawYaml, null as com.jzb.jichang.android.service.ParsedMihomoTemplate?) {
         template?.let { runCatching { MihomoTemplateParser().parse(it.rawYaml) }.getOrNull() }
     }
     val providers = parsed?.ruleProfile?.providers.orEmpty()
     val sourceRules = parsed?.ruleProfile?.rules.orEmpty()
-    var selected by remember(template?.id, providers) { mutableStateOf(emptySet<String>()) }
-    var conflictActions by remember(template?.id, current.providers) { mutableStateOf(emptyMap<String, String>()) }
-    var renamed by remember(template?.id) { mutableStateOf(emptyMap<String, String>()) }
+    var selected by rememberSaveable(template?.id, stateSaver = jsonSaver<Set<String>>()) { mutableStateOf(emptySet<String>()) }
+    var conflictActions by rememberSaveable(template?.id, stateSaver = jsonSaver<Map<String, String>>()) { mutableStateOf(emptyMap<String, String>()) }
+    var renamed by rememberSaveable(template?.id, stateSaver = jsonSaver<Map<String, String>>()) { mutableStateOf(emptyMap<String, String>()) }
+    val scope = rememberCoroutineScope()
+    var preparing by remember { mutableStateOf(false) }
     var importError by remember(template?.id) { mutableStateOf<String?>(null) }
     val defaultTarget = current.groups.firstOrNull { it.name.equals("PROXY", true) }?.name ?: current.groups.firstOrNull()?.name ?: "DIRECT"
     val conflicts = providers.associate { provider ->
@@ -1559,7 +1785,7 @@ private fun TemplateRuleSetApplyDialog(
     FullScreenEditorDialog(
         title = "应用模板规则集",
         dirty = selected.isNotEmpty() || conflictActions.isNotEmpty() || renamed.isNotEmpty(),
-        valid = template != null && selected.isNotEmpty() && !unresolvedConflict && !duplicateName,
+        valid = !preparing && template != null && parsed != null && selected.isNotEmpty() && !unresolvedConflict && !duplicateName,
         saveLabel = "应用",
         onDismiss = onDismiss,
         onSave = {
@@ -1572,8 +1798,19 @@ private fun TemplateRuleSetApplyDialog(
                         else -> null
                     }
                 } }.mapNotNull { (id, action) -> action?.let { id to it } }.toMap()
-                runCatching { com.jzb.jichang.android.service.TemplateRuleSetImporter.apply(current, selectedTemplate, selected, actions, renamed) }
-                    .onSuccess(onApply).onFailure { importError = it.message ?: "模板规则集导入失败" }
+                preparing = true
+                val selectedIds = selected
+                val namesToImport = renamed
+                scope.launch {
+                    try {
+                        val updated = withContext(Dispatchers.Default) {
+                            com.jzb.jichang.android.service.TemplateRuleSetImporter.apply(current, selectedTemplate, selectedIds, actions, namesToImport)
+                        }
+                        onApply(updated)
+                    } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                    catch (error: Exception) { importError = error.message ?: "模板规则集导入失败" }
+                    finally { preparing = false }
+                }
             }
         },
         content = { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1701,32 +1938,31 @@ private fun RuleSimulationDialog(profile: ConfigProfile, statuses: List<com.jzb.
 }
 
 @Composable
-private fun RuleListCard(rule: RoutingRule, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean, selectable: Boolean, checked: Boolean, onCheckedChange: (Boolean) -> Unit, onDuplicate: () -> Unit, showReorder: Boolean = true) {
+private fun RuleListCard(rule: RoutingRule, positionLabel: String? = null, modifier: Modifier = Modifier, onDragStart: (Float) -> Unit = {}, onDrag: (Float) -> Unit = {}, onDragEnd: () -> Unit = {}, onDragCancel: () -> Unit = {}, onEdit: () -> Unit, onMoveUp: () -> Unit, onMoveDown: () -> Unit, onDelete: () -> Unit, canMoveUp: Boolean, canMoveDown: Boolean, selectable: Boolean, checked: Boolean, onCheckedChange: (Boolean) -> Unit, onDuplicate: () -> Unit, showReorder: Boolean = true) {
     var expanded by remember { mutableStateOf(false) }
-    val dragThreshold = with(LocalDensity.current) { 64.dp.toPx() }
-    var dragRemainder by remember(rule, selectable) { mutableStateOf(0f) }
-    Card(onClick = { if (selectable) onCheckedChange(!checked) else onEdit() }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    var handleCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val latestStart by rememberUpdatedState(onDragStart)
+    val latestDrag by rememberUpdatedState(onDrag)
+    val latestEnd by rememberUpdatedState(onDragEnd)
+    val latestCancel by rememberUpdatedState(onDragCancel)
+    Card(onClick = { if (selectable) onCheckedChange(!checked) else onEdit() }, modifier = modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (selectable) Checkbox(checked = checked, onCheckedChange = onCheckedChange)
             Column(Modifier.weight(1f)) {
-                Text(if (rule.type == "MATCH") "最终兜底 · MATCH" else rule.type, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                Text(if (rule.type == "MATCH") "最终兜底 · MATCH" else rule.type + positionLabel?.let { " · $it" }.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Text(ruleSummary(rule), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
                 val parameters = buildList { if (rule.noResolve) add("no-resolve"); if (rule.source) add("src"); addAll(rule.extraParameters) }
                 Text("策略  ${rule.group}${parameters.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · 参数 ", separator = ", ").orEmpty()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (showReorder && !selectable && rule.type != "MATCH") Icon(Icons.Outlined.DragHandle, contentDescription = "长按拖动调整顺序", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier
-                .size(40.dp)
-                .pointerInput(rule, canMoveUp, canMoveDown) {
+                .size(48.dp)
+                .onGloballyPositioned { handleCoordinates = it }
+                .pointerInput(Unit) {
                     detectDragGesturesAfterLongPress(
-                        onDragStart = { dragRemainder = 0f },
-                        onDragEnd = { dragRemainder = 0f },
-                        onDragCancel = { dragRemainder = 0f },
-                        onDrag = { change, amount ->
-                            change.consume()
-                            dragRemainder += amount.y
-                            while (dragRemainder >= dragThreshold && canMoveDown) { onMoveDown(); dragRemainder -= dragThreshold }
-                            while (dragRemainder <= -dragThreshold && canMoveUp) { onMoveUp(); dragRemainder += dragThreshold }
-                        },
+                        onDragStart = { position -> handleCoordinates?.let { latestStart(it.localToRoot(position).y) } },
+                        onDragEnd = { latestEnd() },
+                        onDragCancel = { latestCancel() },
+                        onDrag = { change, _ -> change.consume(); handleCoordinates?.let { latestDrag(it.localToRoot(change.position).y) } },
                     )
                 }.padding(8.dp))
             Box {
@@ -1892,9 +2128,18 @@ private fun ActiveShareCard(url: String, onShareLink: () -> Unit, onStopShare: (
 
 @Composable
 private fun YamlPreviewPage(configText: String, modifier: Modifier = Modifier) {
-    SelectionContainer {
-        Text(configText, modifier.verticalScroll(rememberScrollState()).padding(JichangSpacing.pageHorizontal),
-            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+    val clipboard = LocalClipboardManager.current
+    val chunks = backgroundValue(configText, emptyList<String>()) { configText.lineSequence().chunked(64).map { it.joinToString("\n") }.toList() }
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("YAML 预览", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = { clipboard.setText(AnnotatedString(configText)) }) { Text("复制全部") }
+        }
+        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp)) {
+            items(chunks.size, key = { it }, contentType = { "yaml-chunk" }) { index ->
+                SelectionContainer { Text(chunks[index], fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
     }
 }
 
@@ -1990,7 +2235,7 @@ private fun TemplatesPage(
         if (templates.isEmpty()) item {
             EmptyCard("模板库还是空的", "使用上方按钮添加 Mihomo YAML 模板，以它为基础创建自己的配置。")
         }
-        items(templates, key = { it.id }) { template ->
+        items(templates, key = { it.id }, contentType = { "template" }) { template ->
             val users = profiles.count { it.templateId == template.id }
             var menuExpanded by remember(template.id) { mutableStateOf(false) }
             Card(onClick = { onPreview(template) }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
@@ -2046,8 +2291,8 @@ private fun TemplateCreateDialog(
     onDismiss: () -> Unit,
     onCreate: (String, String) -> Unit,
 ) {
-    var name by remember(template.id) { mutableStateOf("${template.name} 副本") }
-    var fileName by remember(template.id) { mutableStateOf("${template.name} 副本") }
+    var name by rememberSaveable(template.id) { mutableStateOf("${template.name} 副本") }
+    var fileName by rememberSaveable(template.id) { mutableStateOf("${template.name} 副本") }
     JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("基于模板新建配置") },
@@ -2067,7 +2312,7 @@ private fun TemplateRenameDialog(
     onDismiss: () -> Unit,
     onRename: (String) -> Unit,
 ) {
-    var name by remember(template.id) { mutableStateOf(template.name) }
+    var name by rememberSaveable(template.id) { mutableStateOf(template.name) }
     JichangAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("重命名模板") },
@@ -2085,8 +2330,8 @@ private fun RemoteConfigDialog(
     onDismiss: () -> Unit,
     onDownload: (String, String) -> Unit,
 ) {
-    var url by remember { mutableStateOf("") }
-    var fileName by remember { mutableStateOf("") }
+    var url by rememberSaveable { mutableStateOf("") }
+    var fileName by rememberSaveable { mutableStateOf("") }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         JichangDialogSurface(Modifier.fillMaxWidth(0.94f).widthIn(max = 560.dp).wrapContentHeight()) {
             Column(Modifier.padding(JichangSpacing.dialog), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2146,29 +2391,52 @@ private fun EmptyCard(title: String, detail: String) {
 }
 
 @Composable
-private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    JichangAlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("添加订阅") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun SourceDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit, initial: com.jzb.jichang.android.model.SubscriptionSource? = null) {
+    var name by rememberSaveable(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
+    var url by rememberSaveable(initial?.id) { mutableStateOf(initial?.url.orEmpty()) }
+    val validUrl = remember(url) { runCatching { java.net.URI(url.trim()) }.getOrNull()?.let { it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() } == true }
+    FullScreenEditorDialog(
+        title = if (initial == null) "添加订阅" else "编辑订阅",
+        dirty = name != initial?.name.orEmpty() || url != initial?.url.orEmpty(), valid = validUrl,
+        saveLabel = if (initial == null) "添加并刷新" else "保存", onDismiss = onDismiss, onSave = { onSave(name, url) },
+    ) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称（可选）") }, singleLine = true)
-            OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("HTTP(S) 订阅地址") }, singleLine = true)
-        } },
-        confirmButton = { TextButton(onClick = { onSave(name, url) }, enabled = url.isNotBlank()) { Text("添加并刷新") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-
+            OutlinedTextField(url, { url = it }, modifier = Modifier.fillMaxWidth(), label = { Text("HTTP(S) 订阅地址") }, singleLine = true,
+                isError = url.isNotBlank() && !validUrl, supportingText = { if (url.isNotBlank() && !validUrl) Text("请输入有效的 HTTP 或 HTTPS 地址") })
+            Text("修改地址后会刷新订阅，原节点保留至刷新成功。仅修改名称不会下载。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable
 private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(20.dp)).padding(4.dp)) {
-        labels.forEachIndexed { index, label ->
-            TextButton(onClick = { onSelect(index) }, modifier = Modifier.weight(1f), colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
-                containerColor = if (selected == index) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f) else Color.Transparent,
-            )) { Text(label, fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal) }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).glassMaterial(RoundedCornerShape(20.dp)).padding(4.dp)) {
+        val itemWidth = maxWidth / labels.size
+        val motion = LocalMotionEnabled.current
+        val offset by animateDpAsState(itemWidth * selected, quickMotion(if (motion) 180 else 0), label = "segment-indicator")
+        Box(Modifier.width(itemWidth).height(48.dp).graphicsLayer { translationX = offset.toPx() }.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f)))
+        Row(Modifier.fillMaxWidth()) {
+            labels.forEachIndexed { index, label ->
+                TextButton(onClick = { onSelect(index) }, modifier = Modifier.weight(1f).height(48.dp)) {
+                    Text(label, fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RefreshProgressCard(progress: com.jzb.jichang.android.service.RefreshProgress, onCancel: () -> Unit, onRetry: () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("${if (progress.cancelled) "已取消" else if (progress.active) "正在刷新" else "刷新完成"} · ${progress.completed}/${progress.total}", style = MaterialTheme.typography.titleSmall)
+            Text("成功 ${progress.succeeded} · 失败 ${progress.failed}" + if (progress.ignored > 0) " · 忽略过期 ${progress.ignored}" else "", style = MaterialTheme.typography.bodySmall)
+            if (progress.active) LinearProgressIndicator(progress = { progress.completed.toFloat() / progress.total.coerceAtLeast(1) }, modifier = Modifier.fillMaxWidth())
+            Row {
+                if (progress.active) TextButton(onClick = onCancel) { Text("取消刷新") }
+                else if (progress.failed > 0) TextButton(onClick = onRetry) { Text("重试失败项") }
+            }
         }
     }
 }
@@ -2176,7 +2444,7 @@ private fun SegmentedTabs(labels: List<String>, selected: Int, onSelect: (Int) -
 @Composable
 private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val context = LocalContext.current
-    var raw by remember { mutableStateOf("") }
+    var raw by rememberSaveable { mutableStateOf("") }
     var scanError by remember { mutableStateOf<String?>(null) }
     var permissionDenied by remember { mutableStateOf(false) }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -2241,132 +2509,77 @@ private fun NodeDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
 
 @Composable
 private fun GroupDialog(
-    state: AppState,
-    initial: PolicyGroup?,
-    onDismiss: () -> Unit,
+    state: AppState, initial: PolicyGroup?, onDismiss: () -> Unit,
     onSave: (String, String, List<String>, Set<Int>, Set<String>) -> Unit,
 ) {
-    var name by remember(initial?.name) { mutableStateOf(initial?.name.orEmpty()) }
-    var type by remember(initial?.name) { mutableStateOf(initial?.type ?: "select") }
+    var name by rememberSaveable(initial?.name) { mutableStateOf(initial?.name.orEmpty()) }
+    var type by rememberSaveable(initial?.name) { mutableStateOf(initial?.type ?: "select") }
     var expanded by remember { mutableStateOf(false) }
+    var memberQuery by rememberSaveable { mutableStateOf("") }
+    var ruleQuery by rememberSaveable { mutableStateOf("") }
     val profile = state.activeProfile
-    val eligibleNodes = state.nodes.filter { node ->
-        (node.sourceId == null || node.sourceId in profile.selectedSourceIds) && node.id in profile.enabledNodeIds
+    val eligibleNodes = backgroundValue(listOf(state.nodes, profile.selectedSourceIds, profile.enabledNodeIds), emptyList<ProxyNode>()) {
+        state.nodes.filter { (it.sourceId == null || it.sourceId in profile.selectedSourceIds) && it.id in profile.enabledNodeIds }
     }
-    val nodeNames = eligibleNodes.associate { "node:${it.id}" to it.name }
-    val availableGroups = state.ruleProfile.groups.filter { it.name != initial?.name }
-    val validMemberKeys = nodeNames.keys + availableGroups.map { it.name } + setOf("DIRECT", "REJECT")
-    val groupTypes = listOf(
-        "select" to ("手动选择" to "在成员中手动选择出口"),
-        "url-test" to ("延迟优选" to "自动选择响应更快的成员"),
-        "fallback" to ("故障切换" to "当前成员不可用时切换到其他成员"),
-        "load-balance" to ("负载均衡" to "在可用成员间分配连接"),
-    )
-    val selectedGroupType = groupTypes.firstOrNull { it.first == type } ?: groupTypes.first()
-    var members by remember(initial?.name, state.nodes, state.ruleProfile.groups, profile.enabledNodeIds, profile.selectedSourceIds) {
-        val initialMembers = initial?.let { group ->
-            when {
-                group.membersExplicit -> group.members.toSet()
-                group.members.isEmpty() -> nodeNames.keys
-                else -> group.members.toSet()
-            }
-        } ?: nodeNames.keys
-        mutableStateOf(initialMembers.intersect(validMemberKeys))
+    // Use the source snapshot for defaults, rather than the asynchronous search result.
+    val defaultMembers = remember(initial, state.nodes, profile.selectedSourceIds, profile.enabledNodeIds) {
+        initial?.let { if (it.membersExplicit || it.members.isNotEmpty()) it.members.toSet() else null }
+            ?: state.nodes.asSequence().filter { (it.sourceId == null || it.sourceId in profile.selectedSourceIds) && it.id in profile.enabledNodeIds }.map { "node:${it.id}" }.toSet()
     }
-    var selectedRules by remember(initial?.name, state.ruleProfile.rules) { mutableStateOf(emptySet<Int>()) }
-    var selectedProviders by remember(initial?.name, state.ruleProfile.providers) { mutableStateOf(emptySet<String>()) }
-    val initialMembers = initial?.let { if (it.membersExplicit) it.members.toSet() else if (it.members.isEmpty()) nodeNames.keys else it.members.toSet() } ?: nodeNames.keys
+    var members by rememberSaveable(initial?.name, stateSaver = jsonSaver<Set<String>>()) { mutableStateOf(defaultMembers) }
+    var selectedRules by rememberSaveable(initial?.name, stateSaver = jsonSaver<Set<Int>>()) { mutableStateOf(emptySet<Int>()) }
+    var selectedProviders by rememberSaveable(initial?.name, stateSaver = jsonSaver<Set<String>>()) { mutableStateOf(emptySet<String>()) }
+    val availableGroups = remember(state.ruleProfile.groups, initial?.name) { state.ruleProfile.groups.filter { it.name != initial?.name } }
+    val search = debouncedQuery(memberQuery)
+    val shownNodes = backgroundValue(eligibleNodes to search, emptyList<ProxyNode>()) { eligibleNodes.filter { search.isBlank() || it.name.contains(search, true) || it.server.contains(search, true) } }
+    val settledRuleQuery = debouncedQuery(ruleQuery)
+    val shownRules = backgroundValue(state.ruleProfile.rules to settledRuleQuery, emptyList<Pair<Int, RoutingRule>>()) {
+        state.ruleProfile.rules.mapIndexed { i, rule -> i to rule }.filter { (_, rule) -> !rule.type.equals("MATCH", true) && (settledRuleQuery.isBlank() || ruleSummary(rule).contains(settledRuleQuery, true) || rule.type.contains(settledRuleQuery, true)) }
+    }
+    val groupTypes = listOf("select" to "手动选择", "url-test" to "延迟优选", "fallback" to "故障切换", "load-balance" to "负载均衡")
     FullScreenEditorDialog(
         title = if (initial == null) "新建策略组" else "编辑策略组",
-        dirty = name != initial?.name.orEmpty() || type != (initial?.type ?: "select") || members != initialMembers.intersect(validMemberKeys) || selectedRules.isNotEmpty() || selectedProviders.isNotEmpty(),
-        valid = name.isNotBlank(),
-        saveLabel = if (initial == null) "添加" else "保存",
-        onDismiss = onDismiss,
-        onSave = { onSave(name, type, members.toList(), selectedRules, selectedProviders) },
-        content = { Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("策略类型", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        dirty = name != initial?.name.orEmpty() || type != (initial?.type ?: "select") || members != defaultMembers || selectedRules.isNotEmpty() || selectedProviders.isNotEmpty(),
+        valid = name.isNotBlank(), saveLabel = if (initial == null) "添加" else "保存",
+        onDismiss = onDismiss, onSave = { onSave(name, type, members.toList(), selectedRules, selectedProviders) },
+    ) {
+        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+            item(key = "group-fields", contentType = "fields") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("组名称") }, singleLine = true)
                     Box {
-                        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-                                Text(selectedGroupType.second.first, style = MaterialTheme.typography.bodyLarge)
-                                Text(selectedGroupType.second.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "选择策略类型")
-                        }
-                        DropdownMenu(expanded, { expanded = false }) {
-                            groupTypes.forEach { (value, details) ->
-                                DropdownMenuItem(
-                                    text = { Column {
-                                        Text(details.first)
-                                        Text(details.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    } },
-                                    onClick = { type = value; expanded = false },
-                                )
-                            }
-                        }
+                        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text(groupTypes.firstOrNull { it.first == type }?.second ?: type); Icon(Icons.Outlined.KeyboardArrowDown, "选择策略类型") }
+                        DropdownMenu(expanded, { expanded = false }) { groupTypes.forEach { (value, title) -> DropdownMenuItem(text = { Text(title) }, onClick = { type = value; expanded = false }) } }
                     }
+                    Text("代理成员 · 已选 ${members.size} 项", style = MaterialTheme.typography.titleSmall)
+                    OutlinedTextField(memberQuery, { memberQuery = it }, Modifier.fillMaxWidth(), label = { Text("搜索成员名称或服务器") }, singleLine = true)
                 }
             }
-
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("代理成员", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                    Text("${members.size} 项已选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                }
-                Text("选择此组可使用的节点、其他策略组或系统出口。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (eligibleNodes.isEmpty()) Text("当前配置没有已启用节点，可到“资源 → 节点”启用。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                eligibleNodes.forEach { node ->
-                    val key = "node:${node.id}"
-                    GroupSelectionRow(node.name, key in members) { checked ->
-                        members = if (checked) members + key else members - key
-                    }
-                }
-                availableGroups.forEach { group ->
-                    GroupSelectionRow("策略组 · ${group.name}", group.name in members) { checked ->
-                        members = if (checked) members + group.name else members - group.name
-                    }
-                }
-                listOf("DIRECT", "REJECT").forEach { special ->
-                    GroupSelectionRow(special, special in members) { checked ->
-                        members = if (checked) members + special else members - special
-                    }
-                }
+            items(shownNodes, key = { "member:${it.id}" }, contentType = { "selection" }) { node ->
+                val member = "node:${node.id}"
+                GroupSelectionRow(node.name, member in members) { checked -> members = if (checked) members + member else members - member }
+            }
+            items(availableGroups.filter { search.isBlank() || it.name.contains(search, true) }, key = { "group:${it.name}" }, contentType = { "selection" }) { group ->
+                GroupSelectionRow("策略组 · ${group.name}", group.name in members) { checked -> members = if (checked) members + group.name else members - group.name }
+            }
+            items(listOf("DIRECT", "REJECT").filter { search.isBlank() || it.contains(search, true) }, key = { "system:$it" }, contentType = { "selection" }) { member ->
+                GroupSelectionRow(member, member in members) { checked -> members = if (checked) members + member else members - member }
             }
             if (initial == null) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("规则目标", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                        Text("${selectedRules.size + selectedProviders.size} 项已选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                    }
-                    Text("勾选后会把这些规则的目标设为新策略组，并为所选规则集添加路由规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    state.ruleProfile.rules.forEachIndexed { index, rule ->
-                        if (!rule.type.equals("MATCH", true)) GroupSelectionRow(
-                            title = rule.type,
-                            supportingText = "${ruleSummary(rule)} → ${rule.group}",
-                            checked = index in selectedRules,
-                        ) { checked ->
-                            selectedRules = if (checked) selectedRules + index else selectedRules - index
-                        }
-                    }
-                    state.ruleProfile.providers.forEach { provider ->
-                        GroupSelectionRow("规则集 · ${provider.name}", provider.id in selectedProviders) { checked ->
-                            selectedProviders = if (checked) selectedProviders + provider.id else selectedProviders - provider.id
-                        }
-                    }
-                    if (state.ruleProfile.rules.none { !it.type.equals("MATCH", true) } && state.ruleProfile.providers.isEmpty()) {
-                        Text("暂无可应用的规则或规则集。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                item(key = "rule-header", contentType = "fields") { Column {
+                    Text("规则目标 · 已选 ${selectedRules.size + selectedProviders.size} 项", style = MaterialTheme.typography.titleSmall)
+                    Text("所选规则的目标会设为新策略组。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(ruleQuery, { ruleQuery = it }, Modifier.fillMaxWidth(), label = { Text("搜索关联规则") }, singleLine = true)
+                } }
+                items(shownRules, key = { "rule:${it.first}" }, contentType = { "selection" }) { (index, rule) ->
+                    GroupSelectionRow(rule.type, index in selectedRules, "${ruleSummary(rule)} → ${rule.group}") { checked -> selectedRules = if (checked) selectedRules + index else selectedRules - index }
+                }
+                items(state.ruleProfile.providers, key = { "provider:${it.id}" }, contentType = { "selection" }) { provider ->
+                    GroupSelectionRow("规则集 · ${provider.name}", provider.id in selectedProviders) { checked -> selectedProviders = if (checked) selectedProviders + provider.id else selectedProviders - provider.id }
                 }
             }
-            Spacer(Modifier.height(4.dp))
-        } },
-    )
+        }
+    }
 }
 
 @Composable
@@ -2405,15 +2618,15 @@ private val visualRuleTypes = listOf(
 @Composable
 private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDismiss: () -> Unit, onSave: (Int?, RoutingRule) -> Unit) {
     val existing = initial?.second
-    var type by remember(initial) { mutableStateOf(existing?.type ?: "DOMAIN-SUFFIX") }
-    var value by remember(initial) { mutableStateOf(existing?.value.orEmpty()) }
-    var group by remember(initial) { mutableStateOf(existing?.group ?: state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT") }
-    var noResolve by remember(initial) { mutableStateOf(existing?.noResolve ?: false) }
-    var source by remember(initial) { mutableStateOf(existing?.source ?: false) }
-    var conditions by remember(initial) { mutableStateOf(existing?.conditions ?: emptyList()) }
-    var extraParameters by remember(initial) { mutableStateOf(existing?.extraParameters.orEmpty().joinToString("\n")) }
-    var rawLine by remember(initial) { mutableStateOf(existing?.rawLine.orEmpty()) }
-    var editorSection by remember(initial) { mutableStateOf(if (existing?.type in setOf("AND", "OR", "NOT") || existing?.extraParameters.orEmpty().isNotEmpty() || !existing?.rawLine.isNullOrBlank()) 1 else 0) }
+    var type by rememberSaveable(initial) { mutableStateOf(existing?.type ?: "DOMAIN-SUFFIX") }
+    var value by rememberSaveable(initial) { mutableStateOf(existing?.value.orEmpty()) }
+    var group by rememberSaveable(initial) { mutableStateOf(existing?.group ?: state.ruleProfile.groups.firstOrNull()?.name ?: "DIRECT") }
+    var noResolve by rememberSaveable(initial) { mutableStateOf(existing?.noResolve ?: false) }
+    var source by rememberSaveable(initial) { mutableStateOf(existing?.source ?: false) }
+    var conditions by rememberSaveable(initial, stateSaver = jsonSaver<List<RuleCondition>>()) { mutableStateOf(existing?.conditions ?: emptyList()) }
+    var extraParameters by rememberSaveable(initial) { mutableStateOf(existing?.extraParameters.orEmpty().joinToString("\n")) }
+    var rawLine by rememberSaveable(initial) { mutableStateOf(existing?.rawLine.orEmpty()) }
+    var editorSection by rememberSaveable(initial) { mutableStateOf(if (existing?.type in setOf("AND", "OR", "NOT") || existing?.extraParameters.orEmpty().isNotEmpty() || !existing?.rawLine.isNullOrBlank()) 1 else 0) }
     var showTypePicker by remember { mutableStateOf(false) }
     var strategyMenu by remember { mutableStateOf(false) }
     var geositeSearch by remember { mutableStateOf("") }
@@ -2496,8 +2709,8 @@ private fun RuleDialog(state: AppState, initial: Pair<Int, RoutingRule>?, onDism
 @Composable
 private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
     val categories = listOf("全部", "域名", "IP/地理", "端口/网络", "进程", "规则集", "组合")
-    var query by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf(0) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var category by rememberSaveable { mutableStateOf(0) }
     val entries = visualRuleTypes.filter { type ->
         val categoryMatches = when (categories[category]) {
             "域名" -> type.startsWith("DOMAIN") || type == "GEOSITE"
@@ -2537,12 +2750,13 @@ private fun RuleTypePickerDialog(selected: String, onDismiss: () -> Unit, onSele
 /** Uses Android's real backdrop diffusion for floating glass where the OS supports it. */
 @Composable
 private fun ApplyDialogGlassBlur() {
+    val glassEnabled = LocalGlassEnabled.current
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val view = LocalView.current
         val density = LocalDensity.current
         SideEffect {
             val window = (view.parent as? DialogWindowProvider)?.window ?: return@SideEffect
-            window.setBackgroundBlurRadius(with(density) { 30.dp.roundToPx() })
+            window.setBackgroundBlurRadius(if (glassEnabled) with(density) { 30.dp.roundToPx() } else 0)
             window.setDimAmount(0.12f)
         }
     }
@@ -2626,7 +2840,7 @@ private fun ConditionEditor(condition: RuleCondition, providerNames: List<String
 
 @Composable
 private fun RuleProvidersDialog(initial: RuleProfile, initialProviderType: String? = null, onDismiss: () -> Unit, onSave: (RuleProfile) -> Unit) {
-    var profile by remember(initial) { mutableStateOf(initial) }
+    var profile by rememberSaveable(initial, stateSaver = jsonSaver<RuleProfile>()) { mutableStateOf(initial) }
     val providers = profile.providers
     var editing by remember(initialProviderType) { mutableStateOf<RuleProvider?>(when {
         initialProviderType == "http" || initialProviderType == "inline" -> RuleProvider(id = java.util.UUID.randomUUID().toString(), name = "新规则集", type = initialProviderType)
@@ -2707,13 +2921,13 @@ private fun RuleProvidersDialog(initial: RuleProfile, initialProviderType: Strin
 
 @Composable
 private fun RuleProviderEditor(initial: RuleProvider, onDismiss: () -> Unit, onSave: (RuleProvider) -> Unit) {
-    var name by remember(initial.id) { mutableStateOf(initial.name) }; var type by remember(initial.id) { mutableStateOf(initial.type) }
-    var behavior by remember(initial.id) { mutableStateOf(initial.behavior) }; var url by remember(initial.id) { mutableStateOf(initial.url) }
-    var path by remember(initial.id) { mutableStateOf(initial.path) }; var format by remember(initial.id) { mutableStateOf(initial.format) }
-    var interval by remember(initial.id) { mutableStateOf(initial.interval.toString()) }
-    var payload by remember(initial.id) { mutableStateOf(initial.payload.joinToString("\n")) }
-    var headers by remember(initial.id) { mutableStateOf(initial.headers.entries.joinToString("\n") { (key, values) -> key + "=" + values.joinToString(",") }) }
-    var section by remember(initial.id) { mutableStateOf(0) }
+    var name by rememberSaveable(initial.id) { mutableStateOf(initial.name) }; var type by rememberSaveable(initial.id) { mutableStateOf(initial.type) }
+    var behavior by rememberSaveable(initial.id) { mutableStateOf(initial.behavior) }; var url by rememberSaveable(initial.id) { mutableStateOf(initial.url) }
+    var path by rememberSaveable(initial.id) { mutableStateOf(initial.path) }; var format by rememberSaveable(initial.id) { mutableStateOf(initial.format) }
+    var interval by rememberSaveable(initial.id) { mutableStateOf(initial.interval.toString()) }
+    var payload by rememberSaveable(initial.id) { mutableStateOf(initial.payload.joinToString("\n")) }
+    var headers by rememberSaveable(initial.id) { mutableStateOf(initial.headers.entries.joinToString("\n") { (key, values) -> key + "=" + values.joinToString(",") }) }
+    var section by rememberSaveable(initial.id) { mutableStateOf(0) }
     val parsedHeaders = headers.lines().mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0].trim() to it[1].split(",").map(String::trim) } }.toMap()
     val draft = initial.copy(name = name.trim(), type = type, behavior = behavior, url = url, path = path, format = format, interval = interval.toIntOrNull() ?: 86400, payload = payload.lines().filter(String::isNotBlank), headers = parsedHeaders)
     FullScreenEditorDialog(title = "规则集", dirty = draft != initial, valid = name.isNotBlank() && (type != "http" || url.startsWith("http")) && (type != "inline" || payload.isNotBlank()),
@@ -2745,30 +2959,42 @@ private fun RuleProviderEditor(initial: RuleProvider, onDismiss: () -> Unit, onS
 
 @Composable
 private fun ProfileDialog(profile: ConfigProfile, creating: Boolean, onDismiss: () -> Unit, onCreate: (String, String, Boolean) -> Unit, onSave: (String, String, String) -> Unit) {
-    var name by remember(profile.id, creating) { mutableStateOf(if (creating) "" else profile.name) }
-    var fileName by remember(profile.id, creating) { mutableStateOf(if (creating) "" else profile.fileName) }
-    var copy by remember { mutableStateOf(true) }
-    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text(if (creating) "新建配置" else "配置设置") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(name, { name = it; if (creating && fileName.isBlank()) fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("配置名称") }, singleLine = true)
-        OutlinedTextField(fileName, { fileName = it }, modifier = Modifier.fillMaxWidth(), label = { Text("导出文件名（无需 .yaml）") }, singleLine = true)
-        if (creating) Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(copy, { copy = it }); Text("复制当前规则和选择") }
-    } }, confirmButton = { TextButton(enabled = name.isNotBlank() && fileName.isNotBlank(), onClick = { if (creating) onCreate(name.trim(), fileName.trim(), copy) else onSave(profile.id, name.trim(), fileName.trim()) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    var name by rememberSaveable(profile.id, creating) { mutableStateOf(if (creating) "" else profile.name) }
+    var fileName by rememberSaveable(profile.id, creating) { mutableStateOf(if (creating) "" else profile.fileName) }
+    var copy by rememberSaveable { mutableStateOf(true) }
+    FullScreenEditorDialog(title = if (creating) "新建配置" else "配置设置", dirty = name != (if (creating) "" else profile.name) || fileName != (if (creating) "" else profile.fileName),
+        valid = name.isNotBlank() && fileName.isNotBlank(), onDismiss = onDismiss,
+        onSave = { if (creating) onCreate(name.trim(), fileName.trim(), copy) else onSave(profile.id, name.trim(), fileName.trim()) }) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(name, { name = it; if (creating && fileName.isBlank()) fileName = it }, Modifier.fillMaxWidth(), label = { Text("配置名称") }, singleLine = true)
+            OutlinedTextField(fileName, { fileName = it }, Modifier.fillMaxWidth(), label = { Text("导出文件名（无需 .yaml）") }, singleLine = true)
+            if (creating) Row(Modifier.fillMaxWidth().toggleable(copy, role = Role.Checkbox, onValueChange = { copy = it }).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) { Checkbox(copy, null); Text("复制当前规则和选择") }
+        }
+    }
 }
 
 @Composable
 private fun NodeEditDialog(node: ProxyNode, onDismiss: () -> Unit, onSave: (String, String, String, Int, Map<String, Any?>) -> Unit) {
-    var name by remember(node.id) { mutableStateOf(node.name) }; var type by remember(node.id) { mutableStateOf(node.type) }
-    var server by remember(node.id) { mutableStateOf(node.server) }; var port by remember(node.id) { mutableStateOf(node.port.toString()) }
-    var extra by remember(node.id) { mutableStateOf(MihomoNodeOptionsYaml.dump(node.options)) }
-    val parsedOptions = remember(extra) { runCatching { MihomoNodeOptionsYaml.parse(extra) } }
-    JichangAlertDialog(onDismissRequest = onDismiss, title = { Text("编辑节点") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
-        OutlinedTextField(type, { type = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Mihomo 协议类型") }, supportingText = { Text("例如 ss、ssr、vmess、vless、trojan、hysteria2、tuic、anytls") }, singleLine = true)
-        OutlinedTextField(server, { server = it }, modifier = Modifier.fillMaxWidth(), label = { Text("服务器") }, singleLine = true)
-        OutlinedTextField(port, { port = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("端口") }, singleLine = true)
-        OutlinedTextField(extra, { extra = it }, modifier = Modifier.fillMaxWidth(), label = { Text("协议参数 YAML") }, supportingText = { Text("保留布尔值、列表和 TLS/传输层嵌套结构。") }, textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), minLines = 6)
-        parsedOptions.exceptionOrNull()?.let { Text(it.message ?: "协议参数 YAML 无效", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-    } }, confirmButton = { TextButton(enabled = name.isNotBlank() && type.isNotBlank() && server.isNotBlank() && port.toIntOrNull() in 1..65535 && parsedOptions.isSuccess, onClick = { parsedOptions.getOrNull()?.let { onSave(name, type, server, port.toInt(), it) } }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    var name by rememberSaveable(node.id) { mutableStateOf(node.name) }
+    var type by rememberSaveable(node.id) { mutableStateOf(node.type) }
+    var server by rememberSaveable(node.id) { mutableStateOf(node.server) }
+    var port by rememberSaveable(node.id) { mutableStateOf(node.port.toString()) }
+    val baseline = remember(node.id) { MihomoNodeOptionsYaml.dump(node.options) }
+    var extra by rememberSaveable(node.id) { mutableStateOf(baseline) }
+    val settled = debouncedQuery(extra)
+    val parsedOptions = backgroundValue(settled, null as Result<Map<String, Any?>>?) { runCatching { MihomoNodeOptionsYaml.parse(settled) } }
+    FullScreenEditorDialog(title = "编辑节点", dirty = name != node.name || type != node.type || server != node.server || port != node.port.toString() || extra != baseline,
+        valid = name.isNotBlank() && type.isNotBlank() && server.isNotBlank() && port.toIntOrNull() in 1..65535 && parsedOptions?.isSuccess == true && settled == extra,
+        onDismiss = onDismiss, onSave = { parsedOptions?.getOrNull()?.let { onSave(name, type, server, port.toInt(), it) } }) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
+            OutlinedTextField(type, { type = it }, Modifier.fillMaxWidth(), label = { Text("Mihomo 协议类型") }, supportingText = { Text("例如 ss、vmess、vless、trojan、hysteria2、tuic、anytls") }, singleLine = true)
+            OutlinedTextField(server, { server = it }, Modifier.fillMaxWidth(), label = { Text("服务器") }, singleLine = true)
+            OutlinedTextField(port, { port = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("端口") }, singleLine = true)
+            OutlinedTextField(extra, { extra = it }, Modifier.fillMaxWidth(), label = { Text("协议参数 YAML") }, textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), minLines = 6)
+            parsedOptions?.exceptionOrNull()?.let { Text(it.message ?: "协议参数 YAML 无效", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
 }
 
 @Composable

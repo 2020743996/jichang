@@ -35,6 +35,7 @@ class LocalShareService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification())
     }
@@ -85,6 +86,7 @@ class LocalShareService : Service() {
 
     override fun onDestroy() {
         stopSharing()
+        activeInstance = null
         super.onDestroy()
     }
 
@@ -218,6 +220,8 @@ class LocalShareService : Service() {
     }
 
     companion object {
+        @Volatile internal var activeInstance: LocalShareService? = null
+            private set
         const val ACTION_STOP = "com.jzb.jichang.android.action.STOP_SHARE"
         private const val CHANNEL_ID = "jichang-local-share"
         private const val NOTIFICATION_ID = 5401

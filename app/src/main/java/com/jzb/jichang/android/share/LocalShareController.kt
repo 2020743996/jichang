@@ -37,6 +37,12 @@ class LocalShareController(context: Context) {
         override fun onServiceDisconnected(name: ComponentName?) { service = null; mutableUrl.value = null }
     }
 
+    init {
+        if (LocalShareService.activeInstance?.currentUrl != null) {
+            bound = appContext.bindService(Intent(appContext, LocalShareService::class.java), connection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
     fun start(config: String, filename: String) {
         mutableError.value = null
         service?.let { activeService ->
